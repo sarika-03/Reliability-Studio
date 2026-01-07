@@ -1,7 +1,7 @@
 {
   "type": "app",
   "name": "Reliability Studio",
-  "id": "sarika-reliability-app",
+  "id": "sarika-reliability-studio-app",
   "info": {
     "version": "1.0.0",
     "updated": "2026-01-07",
@@ -15,6 +15,12 @@
       "small": "img/logo.svg",
       "large": "img/logo.svg"
     },
+    "screenshots": [
+      {
+        "name": "Incident Timeline",
+        "path": "img/logo.svg"
+      }
+    ],
     "links": [
       {
         "name": "GitHub",
