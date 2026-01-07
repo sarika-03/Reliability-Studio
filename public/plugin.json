@@ -1,0 +1,20 @@
+{
+  "type": "app",
+  "name": "Reliability Studio",
+  "id": "sarika-reliability-studio-app",
+  "version": "0.1.0",
+  "info": {
+    "description": "Unified reliability & incident response workspace for Grafana",
+    "author": {
+      "name": "Sarika"
+    },
+    "keywords": ["sre", "reliability", "observability", "incident", "slo"],
+    "logos": {
+      "small": "img/logo.svg",
+      "large": "img/logo.svg"
+    }
+  },
+  "dependencies": {
+    "grafanaDependency": ">=10.0.0"
+  }
+}

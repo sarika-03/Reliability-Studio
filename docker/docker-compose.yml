@@ -1,0 +1,85 @@
+version: "3.8"
+
+services:
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    # ports:
+    #   - "3000:3000"
+    volumes:
+      - ../public:/var/lib/grafana/plugins/reliability-studio
+    depends_on:
+      - prometheus
+      - loki
+      - tempo
+
+  prometheus:
+    image: prom/prometheus
+    container_name: prometheus
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+    # ports:
+    #   - "9090:9090"
+
+  loki:
+    image: grafana/loki:latest
+    container_name: loki
+    # ports:
+    #   - "3100:3100"
+    command: -config.file=/etc/loki/local-config.yaml
+    volumes:
+      - ./loki.yml:/etc/loki/local-config.yaml
+
+  tempo:
+    image: grafana/tempo:latest
+    container_name: tempo
+    ports:
+      - "3200:3200"
+    command: [ "-config.file=/etc/tempo/local-config.yaml" ]
+    volumes:
+      - ./tempo.yml:/etc/tempo/local-config.yaml
+
+  postgres:
+    image: postgres:15-alpine
+    container_name: reliability-postgres
+    environment:
+      POSTGRES_DB: reliability_studio
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build: ../backend
+    container_name: reliability-backend
+    ports:
+      - "9000:9000"
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_USER: postgres
+      DB_PASSWORD: postgres
+      DB_NAME: reliability_studio
+      PROMETHEUS_URL: http://prometheus:9090
+      LOKI_URL: http://loki:3100
+      TEMPO_URL: http://tempo:3200
+    depends_on:
+      postgres:
+        condition: service_healthy
+      prometheus:
+        condition: service_started
+      loki:
+        condition: service_started
+      tempo:
+        condition: service_started
+
+volumes:
+  postgres_data:
