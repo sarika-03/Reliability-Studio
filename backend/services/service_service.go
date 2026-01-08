@@ -5,7 +5,7 @@ import (
 	"database/sql"
 	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
-	"github.com/sarikasharma2428-web/reliability-studio/models"
+	"github.com/sarika-03/Reliability-Studio/models"
 	"go.uber.org/zap"
 	"time"
 )

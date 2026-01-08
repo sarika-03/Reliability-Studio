@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 
-	"github.com/sarikasharma2428-web/reliability-studio/services"
+	"github.com/sarika-03/Reliability-Studio/services"
 )
 
 func GetK8sStatus(w http.ResponseWriter, r *http.Request) {

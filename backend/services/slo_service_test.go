@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sarikasharma2428-web/reliability-studio/clients"
+	"github.com/sarika-03/Reliability-Studio/clients"
 )
 
 // MockPrometheusClient implements PrometheusQueryClient

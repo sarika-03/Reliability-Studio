@@ -1,6 +1,7 @@
 package clients
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -303,6 +304,76 @@ func (l *LokiClient) Health(ctx context.Context) error {
 
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("loki unhealthy: status %d", resp.StatusCode)
+	}
+
+	return nil
+}
+
+// PushLog pushes a log entry to Loki using the Loki push API
+func (l *LokiClient) PushLog(ctx context.Context, service, level, message string, labels map[string]string) error {
+	// Prepare labels for the stream
+	streamLabels := map[string]string{
+		"service": service,
+		"level":   level,
+	}
+
+	// Merge additional labels
+	for k, v := range labels {
+		if k != "service" && k != "level" {
+			streamLabels[k] = v
+		}
+	}
+
+	// Build label string: {label1="value1",label2="value2",...}
+	var labelParts []string
+	for k, v := range streamLabels {
+		// Escape quotes in values
+		escapedValue := url.QueryEscape(v)
+		labelParts = append(labelParts, fmt.Sprintf(`%s="%s"`, k, escapedValue))
+	}
+
+	// Prepare the log entry in Loki format
+	// Format: timestamp message
+	timestamp := time.Now().UnixNano()
+	logEntry := map[string]interface{}{
+		"streams": []map[string]interface{}{
+			{
+				"stream": streamLabels,
+				"values": [][]string{
+					{
+						fmt.Sprintf("%d", timestamp),
+						message,
+					},
+				},
+			},
+		},
+	}
+
+	// Marshal to JSON
+	body, err := json.Marshal(logEntry)
+	if err != nil {
+		return fmt.Errorf("failed to marshal log entry: %w", err)
+	}
+
+	// Push to Loki via the write API
+	url := fmt.Sprintf("%s/loki/api/v1/push", l.baseURL)
+
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := l.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to push log to Loki: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("loki returned status %d: %s", resp.StatusCode, string(body))
 	}
 
 	return nil

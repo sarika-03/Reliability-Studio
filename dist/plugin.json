@@ -1,26 +1,18 @@
 {
   "type": "app",
   "name": "Reliability Studio",
-  "id": "sarika-reliability-app",
+  "id": "sarika-reliability-studio-app",
+  "version": "0.1.0",
   "info": {
-    "version": "1.0.0",
-    "updated": "2026-01-07",
     "description": "Unified reliability & incident response workspace for Grafana",
     "author": {
-      "name": "Sarika",
-      "url": "https://github.com/sarika-03"
+      "name": "Sarika"
     },
     "keywords": ["sre", "reliability", "observability", "incident", "slo"],
     "logos": {
       "small": "img/logo.svg",
       "large": "img/logo.svg"
-    },
-    "links": [
-      {
-        "name": "GitHub",
-        "url": "https://github.com/sarika-03/Reliability-Studio"
-      }
-    ]
+    }
   },
   "dependencies": {
     "grafanaDependency": ">=10.0.0"

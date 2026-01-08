@@ -1,7 +1,11 @@
 const API_BASE = "http://localhost:9000/api";
 
+import { retry, isRetryableError } from '../../utils/retry-logic';
+import { circuitBreakerManager } from '../../utils/circuit-breaker';
+
 interface FetchOptions extends RequestInit {
   body?: any;
+  serviceName?: string; // For circuit breaker
 }
 
 interface ApiError {
@@ -57,7 +61,7 @@ export function setTokenExpiredCallback(callback: () => void) {
 }
 
 async function apiFetch<T>(endpoint: string, options: FetchOptions = {}): Promise<T> {
-  const { body, ...customConfig } = options;
+  const { body, serviceName = 'backend-api', ...customConfig } = options;
   
   // Get token from localStorage
   const token = localStorage.getItem('access_token');
@@ -77,41 +81,45 @@ async function apiFetch<T>(endpoint: string, options: FetchOptions = {}): Promis
     config.body = JSON.stringify(body);
   }
 
-  try {
-    const response = await fetch(`${API_BASE}${endpoint}`, config);
-    
-    if (!response.ok) {
-      const apiError = await ApiErrorHandler.handle(response);
+  // Use retry logic with circuit breaker
+  return retry(
+    async () => {
+      const response = await fetch(`${API_BASE}${endpoint}`, config);
       
-      // Handle token expiration globally
-      if (apiError.isTokenExpired) {
-        localStorage.removeItem('access_token');
-        localStorage.removeItem('user');
-        if (onTokenExpired) {
-          onTokenExpired();
+      if (!response.ok) {
+        const apiError = await ApiErrorHandler.handle(response);
+        
+        // Handle token expiration globally
+        if (apiError.isTokenExpired) {
+          localStorage.removeItem('access_token');
+          localStorage.removeItem('user');
+          if (onTokenExpired) {
+            onTokenExpired();
+          }
         }
+        
+        const error = new Error(apiError.message) as Error & { status?: number; isTokenExpired?: boolean };
+        error.status = apiError.status;
+        error.isTokenExpired = apiError.isTokenExpired;
+        
+        // Don't retry non-retryable errors
+        if (!isRetryableError(error) && apiError.status !== 503) {
+          throw error;
+        }
+        
+        throw error;
       }
       
-      const error = new Error(apiError.message) as Error & { status?: number; isTokenExpired?: boolean };
-      error.status = apiError.status;
-      error.isTokenExpired = apiError.isTokenExpired;
-      throw error;
+      return await response.json();
+    },
+    serviceName,
+    { maxAttempts: 3, initialDelay: 1000, maxDelay: 8000 }
+  ).then(result => {
+    if (result.success && result.data) {
+      return result.data as T;
     }
-    
-    return await response.json();
-  } catch (error) {
-    // Re-throw with context
-    if (error instanceof Error) {
-      console.error(`Failed to fetch ${endpoint}: ${error.message}`, error);
-      throw error;
-    }
-    
-    // Wrap unexpected errors
-    const wrappedError = new Error(`Failed to fetch ${endpoint}`) as Error & { originalError?: unknown };
-    wrappedError.originalError = error;
-    console.error('Unexpected error in apiFetch:', error);
-    throw wrappedError;
-  }
+    throw result.error || new Error('Failed to fetch data');
+  });
 }
 
 export const backendAPI = {

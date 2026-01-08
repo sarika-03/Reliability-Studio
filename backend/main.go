@@ -18,21 +18,25 @@ import (
 	"github.com/rs/cors"
 	_ "net/http/pprof"
 
-	"github.com/sarikasharma2428-web/reliability-studio/clients"
-	"github.com/sarikasharma2428-web/reliability-studio/correlation"
-	"github.com/sarikasharma2428-web/reliability-studio/database"
-	"github.com/sarikasharma2428-web/reliability-studio/middleware"
-	"github.com/sarikasharma2428-web/reliability-studio/services"
+	"github.com/sarika-03/Reliability-Studio/clients"
+	"github.com/sarika-03/Reliability-Studio/correlation"
+	"github.com/sarika-03/Reliability-Studio/database"
+	"github.com/sarika-03/Reliability-Studio/handlers"
+	"github.com/sarika-03/Reliability-Studio/middleware"
+	"github.com/sarika-03/Reliability-Studio/services"
+	"github.com/sarika-03/Reliability-Studio/stability"
 )
 
 type Server struct {
-	db                *sql.DB
-	promClient        *clients.PrometheusClient
-	k8sClient         *clients.KubernetesClient
-	lokiClient        *clients.LokiClient
-	sloService        *services.SLOService
-	timelineService   *services.TimelineService
-	correlationEngine *correlation.CorrelationEngine
+	db                 *sql.DB
+	promClient         *clients.PrometheusClient
+	k8sClient          *clients.KubernetesClient
+	lokiClient         *clients.LokiClient
+	sloService         *services.SLOService
+	timelineService    *services.TimelineService
+	correlationEngine  *correlation.CorrelationEngine
+	healthChecker      *stability.HealthChecker
+	circuitBreaker     *stability.CircuitBreakerManager
 }
 
 func main() {
@@ -82,6 +86,16 @@ func main() {
 	timelineService := services.NewTimelineService(db)
 	correlationEngine := correlation.NewCorrelationEngine(db, promClient, k8sInterface, lokiClient)
 
+	// Initialize stability systems
+	log.Println("🛡️  Initializing stability systems...")
+	circuitBreaker := stability.NewCircuitBreakerManager()
+	healthChecker := stability.NewHealthChecker(
+		db,
+		promURL,
+		lokiURL,
+		func() bool { return correlationEngine != nil }, // Simple readiness check
+	)
+
 	// Create server
 	server := &Server{
 		db:                db,
@@ -91,6 +105,8 @@ func main() {
 		sloService:        sloService,
 		timelineService:   timelineService,
 		correlationEngine: correlationEngine,
+		healthChecker:     healthChecker,
+		circuitBreaker:    circuitBreaker,
 	}
 
 	// Setup router
@@ -104,6 +120,7 @@ func main() {
 
 	// Public routes
 	router.HandleFunc("/health", server.healthHandler).Methods("GET")
+	router.HandleFunc("/api/health", handlers.HandleHealthCheck(healthChecker)).Methods("GET")
 	router.HandleFunc("/api/auth/login", middleware.LoginHandler(db)).Methods("POST")
 	router.HandleFunc("/api/auth/register", middleware.RegisterHandler(db)).Methods("POST")
 	router.HandleFunc("/api/auth/refresh", middleware.RefreshTokenHandler()).Methods("POST")
@@ -150,6 +167,17 @@ func main() {
 	admin.Use(middleware.RequireRole("admin"))
 	admin.HandleFunc("/users", server.getUsersHandler).Methods("GET")
 	admin.HandleFunc("/services", server.getServicesHandler).Methods("GET")
+
+	// Test endpoints - for chaos engineering and verification
+	// Note: These are public endpoints for testing purposes
+	test := router.PathPrefix("/api/test").Subrouter()
+	test.HandleFunc("/load", handlers.HandleTestLoad).Methods("POST")
+	test.HandleFunc("/fail", handlers.HandleTestFail).Methods("POST")
+	test.HandleFunc("/log", handlers.HandleTestLog).Methods("POST")
+
+	// Initialize test handlers with dependencies
+	// Using nil for logger - handlers will use standard logging
+	handlers.InitTestHandlers(promClient, lokiClient, nil, sloService, nil)
 
 	// CORS configuration - HARDENED: Strict origins, no wildcards
 	allowedOrigins := strings.Split(getEnvStrict("CORS_ALLOWED_ORIGINS"), ",")

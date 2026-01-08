@@ -6,7 +6,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"github.com/sarikasharma2428-web/reliability-studio/clients"
+	"github.com/sarika-03/Reliability-Studio/clients"
 	"sync"
 	"time"
 )

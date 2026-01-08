@@ -73,7 +73,7 @@
 
 ```bash
 # Clone the repository
-git clone https://github.com/sarika2428/Reliability-Studio.git
+git clone https://github.com/sarika-03/Reliability-Studio.git
 cd Reliability-Studio
 
 # Start services with Docker Compose
@@ -182,7 +182,7 @@ GET    /api/correlations/:id - Get correlation results
 - [OK] Secure cookies with HttpOnly, Secure, SameSite flags
 - [OK] No hardcoded secrets (all from environment variables)
 
-See [SECURITY.md](SECURITY.md) for detailed security documentation.
+See [SECURITY.md](https://github.com/sarika-03/Reliability-Studio/blob/main/SECURITY.md) for detailed security documentation.
 
 ## Production Deployment
 
@@ -227,9 +227,9 @@ go test ./...
 
 ## Documentation
 
-- [SECURITY.md](SECURITY.md) - Security implementation details
-- [BACKEND_STABILITY_VERIFICATION.md](BACKEND_STABILITY_VERIFICATION.md) - Backend stability verification
-- [PRODUCTION_OPTIMIZATIONS.md](PRODUCTION_OPTIMIZATIONS.md) - Production optimization guide
+- [SECURITY.md](https://github.com/sarika-03/Reliability-Studio/blob/main/SECURITY.md) - Security implementation details
+- [BACKEND_STABILITY_VERIFICATION.md](https://github.com/sarika-03/Reliability-Studio/blob/main/BACKEND_STABILITY_VERIFICATION.md) - Backend stability verification
+- [PRODUCTION_OPTIMIZATIONS.md](https://github.com/sarika-03/Reliability-Studio/blob/main/PRODUCTION_OPTIMIZATIONS.md) - Production optimization guide
 
 ## Support & Contributing
 

@@ -3,8 +3,8 @@ package handlers
 import (
 	"encoding/json"
 	"github.com/gorilla/mux"
-	"github.com/sarikasharma2428-web/reliability-studio/models"
-	"github.com/sarikasharma2428-web/reliability-studio/services"
+	"github.com/sarika-03/Reliability-Studio/models"
+	"github.com/sarika-03/Reliability-Studio/services"
 	"go.uber.org/zap"
 	"net/http"
 )
@@ -29,7 +29,7 @@ func InitHandlers(is *services.IncidentService, ss *services.ServiceService, slo
 func HealthCheck(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{
 		"status":  "healthy",
-		"service": "github.com/sarikasharma2428-web/reliability-studio",
+		"service": "github.com/sarika-03/Reliability-Studio",
 	})
 }
 

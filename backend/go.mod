@@ -1,4 +1,4 @@
-module github.com/sarikasharma2428-web/reliability-studio
+module github.com/sarika-03/Reliability-Studio
 
 go 1.24.0
 

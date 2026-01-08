@@ -2,6 +2,8 @@ import React, { useState, useEffect } from 'react';
 import { css, cx } from '@emotion/css';
 import { backendAPI } from './api/backend';
 import { SLOData, Incident } from './types';
+import { ErrorBoundary } from './components/ErrorBoundary';
+import HealthIndicator from '../components/HealthIndicator';
 
 const theme = {
   bg: '#0d0e12',
@@ -419,6 +421,7 @@ const Header: React.FC<{ user: any; onLogout: () => void }> = ({ user, onLogout 
         <span className={styles.metaItem}>Local Time: <span className={styles.metaHigh}>{time.toLocaleTimeString()}</span></span>
       </div>
       <div className={styles.flexCenter}>
+        <HealthIndicator healthCheckInterval={60000} showDetails={true} />
         {user && (
           <div className={styles.flexCenter}>
             <span className={styles.metaItem}>{user.username}</span>
@@ -770,18 +773,24 @@ export const App = () => {
     <div className={styles.appContainer}>
       <Header user={user} onLogout={handleLogout} />
       <div className={styles.contentWrapper}>
-        <div className={styles.kpiGrid}>
-          {slos.slice(0, 4).map(slo => <SLOCard key={slo.id} slo={slo} />)}
-          {slos.length === 0 && <span className={styles.textMuted}>No SLOs configured.</span>}
-        </div>
-        <MainBoard
-          incidents={incidents}
-          selectedIncident={selectedIncident}
-          onSelectIncident={setSelectedIncident}
-          timeline={timeline}
-          correlations={correlations}
-        />
-        <TelemetryConsole selectedIncident={selectedIncident} />
+        <ErrorBoundary level="section">
+          <div className={styles.kpiGrid}>
+            {slos.slice(0, 4).map(slo => <SLOCard key={slo.id} slo={slo} />)}
+            {slos.length === 0 && <span className={styles.textMuted}>No SLOs configured.</span>}
+          </div>
+        </ErrorBoundary>
+        <ErrorBoundary level="section">
+          <MainBoard
+            incidents={incidents}
+            selectedIncident={selectedIncident}
+            onSelectIncident={setSelectedIncident}
+            timeline={timeline}
+            correlations={correlations}
+          />
+        </ErrorBoundary>
+        <ErrorBoundary level="section">
+          <TelemetryConsole selectedIncident={selectedIncident} />
+        </ErrorBoundary>
       </div>
     </div>
   );
