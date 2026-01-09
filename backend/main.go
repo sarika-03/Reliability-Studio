@@ -25,6 +25,7 @@ import (
 	"github.com/sarika-03/Reliability-Studio/middleware"
 	"github.com/sarika-03/Reliability-Studio/services"
 	"github.com/sarika-03/Reliability-Studio/stability"
+	"github.com/sarika-03/Reliability-Studio/utils"
 )
 
 type Server struct {
@@ -37,6 +38,7 @@ type Server struct {
 	correlationEngine  *correlation.CorrelationEngine
 	healthChecker      *stability.HealthChecker
 	circuitBreaker     *stability.CircuitBreakerManager
+	logger             *utils.StructuredLogger
 }
 
 func main() {
@@ -86,6 +88,10 @@ func main() {
 	timelineService := services.NewTimelineService(db)
 	correlationEngine := correlation.NewCorrelationEngine(db, promClient, k8sInterface, lokiClient)
 
+	// Initialize structured logger
+	log.Println("📝 Initializing structured logger...")
+	structuredLogger := utils.NewStructuredLogger(lokiClient, "reliability-studio")
+
 	// Initialize stability systems
 	log.Println("🛡️  Initializing stability systems...")
 	circuitBreaker := stability.NewCircuitBreakerManager()
@@ -106,6 +112,7 @@ func main() {
 		timelineService:   timelineService,
 		correlationEngine: correlationEngine,
 		healthChecker:     healthChecker,
+		logger:            structuredLogger,
 		circuitBreaker:    circuitBreaker,
 	}
 
@@ -117,6 +124,10 @@ func main() {
 	router.Use(middleware.Logging)
 	router.Use(middleware.SecurityHeadersMiddleware)
 	router.Use(middleware.RateLimitingMiddleware)
+	
+	// Add telemetry middleware to capture all metrics and logs
+	telemetryMiddleware := middleware.NewTelemetryMiddleware(promClient, lokiClient, "reliability-studio")
+	router.Use(telemetryMiddleware.Middleware)
 
 	// Public routes
 	router.HandleFunc("/health", server.healthHandler).Methods("GET")
@@ -248,22 +259,94 @@ func main() {
 // Background jobs - FIXED: Now accepts context for graceful shutdown
 func (s *Server) startBackgroundJobs(ctx context.Context) {
 	// Calculate SLOs every 5 minutes
-	ticker := time.NewTicker(5 * time.Minute)
-	defer ticker.Stop()
+	sloTicker := time.NewTicker(5 * time.Minute)
+	defer sloTicker.Stop()
+
+	// Generate sample telemetry every 30 seconds for local development
+	telemetryTicker := time.NewTicker(30 * time.Second)
+	defer telemetryTicker.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
 			log.Println("Background jobs shutting down...")
 			return
-		case <-ticker.C:
+		case <-sloTicker.C:
 			jobCtx := context.Background()
 			log.Println("⏰ Running SLO calculations...")
 			if err := s.sloService.CalculateAllSLOs(jobCtx); err != nil {
 				log.Printf("Error calculating SLOs: %v", err)
 			}
+		case <-telemetryTicker.C:
+			// Generate sample telemetry for development
+			go s.generateSampleTelemetry(ctx)
 		}
 	}
+}
+
+// generateSampleTelemetry generates sample metrics and logs for development/testing
+func (s *Server) generateSampleTelemetry(ctx context.Context) {
+	if s.promClient == nil || s.lokiClient == nil {
+		return
+	}
+
+	// Simulate requests to different services
+	services := []string{"api-gateway", "user-service", "payment-service", "notification-service"}
+	
+	for _, serviceName := range services {
+		// Generate request metric
+		labels := map[string]string{
+			"service":     serviceName,
+			"method":      "GET",
+			"endpoint":    "/api/v1/data",
+			"status_code": "200",
+		}
+
+		// Random latency between 10-200ms
+		latency := float64(10 + (len(serviceName) % 190))
+		if err := s.promClient.PushHistogram(ctx, "http_request_duration_seconds", latency/1000.0, labels); err != nil {
+			log.Printf("⚠️  Failed to push sample telemetry: %v", err)
+		}
+
+		// Push counter
+		if err := s.promClient.PushCounter(ctx, "http_requests_total", 1, labels); err != nil {
+			log.Printf("⚠️  Failed to push sample counter: %v", err)
+		}
+
+		// Generate sample log
+		logMessage := fmt.Sprintf("Request processed: GET /api/v1/data -> 200 OK (%.1fms)", latency)
+		logLabels := map[string]string{
+			"service": serviceName,
+			"level":   "info",
+		}
+		if err := s.lokiClient.PushLog(ctx, serviceName, "info", logMessage, logLabels); err != nil {
+			log.Printf("⚠️  Failed to push sample log: %v", err)
+		}
+	}
+
+	// Occasionally generate an error for one service
+	if time.Now().Unix()%10 == 0 { // Every ~10 seconds
+		errorLabels := map[string]string{
+			"service":     "user-service",
+			"method":      "POST",
+			"endpoint":    "/api/v1/users",
+			"status_code": "500",
+		}
+		if err := s.promClient.PushCounter(ctx, "http_requests_error_total", 1, errorLabels); err != nil {
+			log.Printf("⚠️  Failed to push error metric: %v", err)
+		}
+
+		// Push error log
+		errorLogLabels := map[string]string{
+			"service": "user-service",
+			"level":   "error",
+		}
+		if err := s.lokiClient.PushLog(ctx, "user-service", "error", "Database connection timeout", errorLogLabels); err != nil {
+			log.Printf("⚠️  Failed to push error log: %v", err)
+		}
+	}
+
+	log.Println("📊 Sample telemetry generated")
 }
 
 // Handlers

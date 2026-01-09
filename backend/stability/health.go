@@ -225,18 +225,22 @@ func (hc *HealthChecker) checkPrometheus(ctx context.Context) ComponentHealth {
 }
 
 // checkLoki checks Loki connectivity
+// NOTE: Loki's /ready endpoint may return non-200 during ring initialization.
+// We check the metrics endpoint instead to verify Loki is responding.
+// Only report unhealthy if Loki is completely unreachable.
 func (hc *HealthChecker) checkLoki(ctx context.Context) ComponentHealth {
 	startTime := time.Now()
 	status := StatusHealthy
 	message := "Loki OK"
 
-	// Try to reach Loki ready endpoint
-	readyURL := fmt.Sprintf("%s/ready", hc.lokiURL)
+	// First try /metrics endpoint - more lenient than /ready
+	metricsURL := fmt.Sprintf("%s/metrics", hc.lokiURL)
 
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, "GET", readyURL, nil)
+	client := &http.Client{Timeout: 5 * time.Second}
+	req, err := http.NewRequestWithContext(ctx, "GET", metricsURL, nil)
 	if err != nil {
 		status = StatusUnhealthy
 		message = fmt.Sprintf("Failed to create request: %v", err)
@@ -249,18 +253,25 @@ func (hc *HealthChecker) checkLoki(ctx context.Context) ComponentHealth {
 		}
 	}
 
-	client := &http.Client{Timeout: 5 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
 		status = StatusUnhealthy
 		message = fmt.Sprintf("Loki unreachable: %v", err)
-	} else if resp.StatusCode != http.StatusOK {
-		status = StatusUnhealthy
-		message = fmt.Sprintf("Loki returned status %d", resp.StatusCode)
-		resp.Body.Close()
 	} else {
-		resp.Body.Close()
-		message = "Loki OK"
+		defer resp.Body.Close()
+		// Accept any 2xx or 3xx as "Loki is available"
+		// Accept 503 with grace period as it may be starting up
+		if resp.StatusCode >= 200 && resp.StatusCode < 400 {
+			status = StatusHealthy
+			message = "Loki OK"
+		} else if resp.StatusCode == http.StatusServiceUnavailable {
+			// Loki may be initializing - degrade but don't fail
+			status = StatusDegraded
+			message = "Loki initializing (ring startup)"
+		} else {
+			status = StatusUnhealthy
+			message = fmt.Sprintf("Loki returned status %d", resp.StatusCode)
+		}
 	}
 
 	return ComponentHealth{

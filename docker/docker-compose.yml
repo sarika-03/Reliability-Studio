@@ -5,8 +5,8 @@ services:
   grafana:
     image: grafana/grafana:latest
     container_name: grafana
-    # ports:
-    #   - "3000:3000"
+    ports:
+      - "3000:3000"
     volumes:
       - ../public:/var/lib/grafana/plugins/reliability-studio
     depends_on:
@@ -17,16 +17,16 @@ services:
   prometheus:
     image: prom/prometheus
     container_name: prometheus
+    ports:
+      - "9090:9090"
     volumes:
       - ./prometheus.yml:/etc/prometheus/prometheus.yml
-    # ports:
-    #   - "9090:9090"
 
   loki:
     image: grafana/loki:latest
     container_name: loki
-    # ports:
-    #   - "3100:3100"
+    ports:
+      - "3100:3100"
     command: -config.file=/etc/loki/local-config.yaml
     volumes:
       - ./loki.yml:/etc/loki/local-config.yaml
@@ -71,6 +71,8 @@ services:
       PROMETHEUS_URL: http://prometheus:9090
       LOKI_URL: http://loki:3100
       TEMPO_URL: http://tempo:3200
+      JWT_SECRET: dev-secret-change-this
+      CORS_ALLOWED_ORIGINS: http://localhost:3000,http://localhost:5173,http://0.0.0.0:3000,http://0.0.0.0:5173,http://127.0.0.1:3000,http://127.0.0.1:5173
     depends_on:
       postgres:
         condition: service_healthy

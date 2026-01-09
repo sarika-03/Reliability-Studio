@@ -11,6 +11,7 @@ export const IncidentsListPage = () => {
     const navigate = useNavigate();
     const [incidents, setIncidents] = useState<Incident[]>([]);
     const [filter, setFilter] = useState('open');
+    const [loading, setLoading] = useState(true);
     const styles = useStyles2(getStyles);
 
     useEffect(() => {
@@ -18,12 +19,20 @@ export const IncidentsListPage = () => {
     }, [filter]);
 
     const loadIncidents = async () => {
-        const data = await incidentsApi.list();
-        // Filter based on selected filter
-        const filtered = filter === 'open' 
-            ? (Array.isArray(data) ? data.filter((i: Incident) => i.status === 'open') : [])
-            : (Array.isArray(data) ? data : []);
-        setIncidents(filtered);
+        setLoading(true);
+        try {
+            const data = await incidentsApi.list();
+            // Filter based on selected filter
+            const filtered = filter === 'open' 
+                ? (Array.isArray(data) ? data.filter((i: Incident) => i.status === 'open') : [])
+                : (Array.isArray(data) ? data : []);
+            setIncidents(filtered);
+        } catch (error) {
+            console.error('Failed to load incidents:', error);
+            setIncidents([]);
+        } finally {
+            setLoading(false);
+        }
     };
 
     const createNewIncident = () => {
@@ -59,15 +68,28 @@ export const IncidentsListPage = () => {
                 </button>
             </div>
 
-            <div className={styles.list}>
-                {incidents.map((incident: Incident) => (
-                    <IncidentCard
-                        key={incident.id}
-                        incident={incident}
-                        onClick={() => navigateToIncident(incident.id)}
-                    />
-                ))}
-            </div>
+            {loading ? (
+                <div className={styles.emptyState}>Loading incidents...</div>
+            ) : incidents.length === 0 ? (
+                <div className={styles.emptyState}>
+                    <h3>No Incidents Found</h3>
+                    <p>
+                        {filter === 'open'
+                            ? 'All services are running smoothly. No open incidents detected.'
+                            : 'No incidents in your system yet. Start testing with the test endpoints to generate sample data.'}
+                    </p>
+                </div>
+            ) : (
+                <div className={styles.list}>
+                    {incidents.map((incident: Incident) => (
+                        <IncidentCard
+                            key={incident.id}
+                            incident={incident}
+                            onClick={() => navigateToIncident(incident.id)}
+                        />
+                    ))}
+                </div>
+            )}
         </div>
     );
 };
@@ -95,5 +117,22 @@ const getStyles = (theme: GrafanaTheme2) => ({
       display: flex;
       flex-direction: column;
       gap: ${theme.spacing(1)};
+    `,
+    emptyState: css`
+      text-align: center;
+      padding: ${theme.spacing(6)};
+      background-color: ${theme.colors.background.secondary};
+      border-radius: 4px;
+      border: 1px solid ${theme.colors.border.weak};
+      
+      h3 {
+        color: ${theme.colors.text.primary};
+        margin-bottom: ${theme.spacing(1)};
+      }
+      
+      p {
+        color: ${theme.colors.text.secondary};
+        margin: 0;
+      }
     `,
 });
