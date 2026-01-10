@@ -9,7 +9,13 @@
       "name": "Sarika",
       "url": "https://github.com/sarika-03"
     },
-    "keywords": ["sre", "reliability", "observability", "incident", "slo"],
+    "keywords": [
+      "sre",
+      "reliability",
+      "observability",
+      "incident",
+      "slo"
+    ],
     "version": "1.0.0",
     "updated": "2026-01-09",
     "logos": {
@@ -41,4 +47,3 @@
     "grafanaDependency": ">=10.0.0"
   }
 }
-

@@ -1,23 +1,32 @@
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
+import path from 'path';
 
 export default defineConfig({
   plugins: [react()],
-  server: {
-    port: 5173,
-    host: true,
-  },
+
   build: {
-    sourcemap: true,
+    lib: {
+      entry: path.resolve(__dirname, 'src/module.tsx'),
+      name: 'plugin',
+      formats: ['amd'], // AMD format for Grafana
+      fileName: () => 'module.js',
+    },
     outDir: 'dist',
     rollupOptions: {
-      input: 'src/index.ts',
-      output: {
-        entryFileNames: 'module.js',
-        chunkFileNames: 'assets/[name]-[hash].js',
-        assetFileNames: 'assets/[name]-[hash][extname]',
-      },
+      external: [
+        'react',
+        'react-dom',
+        '@grafana/data',
+        '@grafana/ui',
+        '@grafana/runtime',
+        'lodash',
+        'moment',
+      ],
     },
   },
-  publicDir: 'public',
+
+  define: {
+    'process.env': {},
+  },
 });

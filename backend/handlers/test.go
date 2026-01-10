@@ -9,7 +9,6 @@ import (
 	"math"
 	"math/rand"
 	"net/http"
-	"time"
 )
 
 // TestLoadRequest defines the payload for load injection
