@@ -128,7 +128,7 @@ func InitSchema(db *sql.DB) error {
 		title VARCHAR(500) NOT NULL,
 		description TEXT,
 		severity VARCHAR(20) NOT NULL,
-		status VARCHAR(20) NOT NULL DEFAULT 'active',
+		status VARCHAR(20) NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'investigating', 'mitigated', 'resolved')),
 		service_id UUID REFERENCES services(id) ON DELETE SET NULL,
 		source VARCHAR(50) DEFAULT 'manual',
 		alert_name VARCHAR(255),
@@ -287,18 +287,49 @@ func SeedDefaultData(db *sql.DB) error {
 		}
 	}
 
-	// Insert an initial incident for testing
-	var frontendID string
-	err = db.QueryRow("SELECT id FROM services WHERE name = 'frontend-web'").Scan(&frontendID)
-	if err == nil {
-		_, _ = db.Exec(`
-			INSERT INTO incidents (title, description, severity, status, service_id, started_at)
-			VALUES ($1, $2, $3, $4, $5, NOW() - INTERVAL '10 minutes')
-			ON CONFLICT DO NOTHING
-		`, "High Error Rate in Frontend", "Spike in 5xx errors detected via Prometheus", "critical", "active", frontendID)
+	// Insert detection rules for automatic incident detection
+	detectionRules := []struct {
+		name           string
+		description    string
+		ruleType       string
+		query          string
+		thresholdValue float64
+		severity       string
+	}{
+		{
+			name:           "High Error Rate",
+			description:    "Detects error rate > 5% for any service",
+			ruleType:       "threshold",
+			query:          `rate(http_requests_total{service=~".+",status=~"5.."}[5m]) / rate(http_requests_total{service=~".+"}[5m])`,
+			thresholdValue: 0.05,
+			severity:       "critical",
+		},
+		{
+			name:           "High Latency",
+			description:    "Detects P95 latency > 1s",
+			ruleType:       "threshold",
+			query:          `histogram_quantile(0.95, rate(http_request_duration_seconds_bucket{service=~".+"}[5m]))`,
+			thresholdValue: 1.0,
+			severity:       "high",
+		},
 	}
 
-	log.Println("✅ Default data (services, users, SLOs, incidents) seeded successfully")
+	for _, rule := range detectionRules {
+		_, _ = db.Exec(`
+			INSERT INTO correlation_rules (name, description, enabled, rule_type, query, threshold_value, severity)
+			VALUES ($1, $2, true, $3, $4, $5, $6)
+			ON CONFLICT (name) DO UPDATE 
+			SET description = EXCLUDED.description,
+			    rule_type = EXCLUDED.rule_type,
+			    query = EXCLUDED.query,
+			    threshold_value = EXCLUDED.threshold_value,
+			    severity = EXCLUDED.severity,
+			    enabled = true,
+			    updated_at = NOW()
+		`, rule.name, rule.description, rule.ruleType, rule.query, rule.thresholdValue, rule.severity)
+	}
+
+	log.Println("✅ Default data (services, users, SLOs, detection rules) seeded successfully")
 	return nil
 }
 

@@ -53,9 +53,18 @@ export const LogsTab: React.FC<LogsTabProps> = ({ incident }) => {
     }
   };
 
+  // Get incident timeframe for display
+  const startTime = incident ? new Date(incident.started_at).toLocaleString() : '';
+  const endTime = incident?.resolved_at ? new Date(incident.resolved_at).toLocaleString() : 'now';
+
   return (
     <div style={styles.container}>
-      <h4 style={styles.heading}>Error Logs</h4>
+      <h4 style={styles.heading}>
+        Error Logs
+        <span style={{ fontSize: '11px', fontWeight: 'normal', color: '#999', marginLeft: '12px' }}>
+          (Filtered to incident timeframe: {startTime} - {endTime}, service: {incident?.service || 'unknown'})
+        </span>
+      </h4>
       {logs.length === 0 ? (
         <p style={styles.empty}>No error logs found</p>
       ) : (

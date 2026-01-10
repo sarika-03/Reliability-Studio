@@ -1,0 +1,139 @@
+package handlers
+
+import (
+	"encoding/json"
+	"github.com/gorilla/mux"
+	"github.com/sarika-03/Reliability-Studio/services"
+	"go.uber.org/zap"
+	"net/http"
+)
+
+var investigationService *services.InvestigationService
+
+// InitInvestigationHandlers initializes investigation handlers
+func InitInvestigationHandlers(is *services.InvestigationService) {
+	investigationService = is
+}
+
+// GetInvestigationHypotheses returns all hypotheses for an incident
+func GetInvestigationHypotheses(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	incidentID := vars["id"]
+
+	hypotheses, err := investigationService.GetHypotheses(r.Context(), incidentID)
+	if err != nil {
+		logger.Error("Failed to get hypotheses", zap.Error(err))
+		http.Error(w, "Failed to retrieve hypotheses", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(hypotheses)
+}
+
+// CreateInvestigationHypothesis creates a new hypothesis
+func CreateInvestigationHypothesis(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	incidentID := vars["id"]
+
+	var req struct {
+		Title       string `json:"title"`
+		Description string `json:"description"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	hypothesis, err := investigationService.CreateHypothesis(r.Context(), incidentID, req.Title, req.Description)
+	if err != nil {
+		logger.Error("Failed to create hypothesis", zap.Error(err))
+		http.Error(w, "Failed to create hypothesis", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(hypothesis)
+}
+
+// GetInvestigationSteps returns all investigation steps for an incident
+func GetInvestigationSteps(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	incidentID := vars["id"]
+
+	steps, err := investigationService.GetInvestigationSteps(r.Context(), incidentID)
+	if err != nil {
+		logger.Error("Failed to get investigation steps", zap.Error(err))
+		http.Error(w, "Failed to retrieve investigation steps", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(steps)
+}
+
+// CreateInvestigationStep creates a new investigation step
+func CreateInvestigationStep(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	incidentID := vars["id"]
+
+	var req struct {
+		Title  string `json:"title"`
+		Action string `json:"action"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	step, err := investigationService.CreateInvestigationStep(r.Context(), incidentID, req.Title, req.Action)
+	if err != nil {
+		logger.Error("Failed to create investigation step", zap.Error(err))
+		http.Error(w, "Failed to create investigation step", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(step)
+}
+
+// GetRootCauseAnalysis returns the RCA for an incident
+func GetRootCauseAnalysis(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	incidentID := vars["id"]
+
+	rca, err := investigationService.GenerateRootCauseAnalysis(r.Context(), incidentID)
+	if err != nil {
+		logger.Error("Failed to generate RCA", zap.Error(err))
+		http.Error(w, "Failed to generate RCA", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(rca)
+}
+
+// GetRecommendedActions returns suggested investigation actions
+func GetRecommendedActions(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	incidentID := vars["id"]
+
+	// Get incident details to determine severity
+	incident, err := incidentService.GetByID(r.Context(), incidentID)
+	if err != nil || incident == nil {
+		http.Error(w, "Incident not found", http.StatusNotFound)
+		return
+	}
+
+	actions := investigationService.GetRecommendedActions(incident.Title, incident.Severity)
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"incident_id": incidentID,
+		"actions":     actions,
+	})
+}

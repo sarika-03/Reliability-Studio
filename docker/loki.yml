@@ -4,15 +4,11 @@ server:
   http_listen_port: 3100
 
 common:
-  path_prefix: /loki
-  storage:
-    filesystem:
-      chunks_directory: /loki/chunks
-      rules_directory: /loki/rules
-  replication_factor: 1
   ring:
     kvstore:
       store: inmemory
+  replication_factor: 1
+  path_prefix: /loki
 
 schema_config:
   configs:
@@ -23,6 +19,11 @@ schema_config:
       index:
         prefix: index_
         period: 24h
+
+storage_config:
+  boltdb_shipper:
+    active_index_directory: /loki/index
+    cache_location: /loki/cache
 
 limits_config:
   allow_structured_metadata: false

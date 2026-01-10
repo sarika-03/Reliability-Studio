@@ -19,7 +19,17 @@ export const TimelineView: React.FC<TimelineViewProps> = ({ incidentId = '' }: T
   const [loading, setLoading] = useState<boolean>(true);
 
   useEffect(() => {
+    if (!incidentId) return;
+    
+    // Initial load
     loadTimeline();
+    
+    // LIVE UPDATES: Poll for new timeline events every 5 seconds (control plane behavior)
+    const interval = setInterval(() => {
+      loadTimeline();
+    }, 5000);
+    
+    return () => clearInterval(interval);
   }, [incidentId]);
 
   const loadTimeline = async (): Promise<void> => {

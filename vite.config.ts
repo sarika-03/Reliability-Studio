@@ -11,6 +11,7 @@ export default defineConfig({
     sourcemap: true,
     outDir: 'dist',
     rollupOptions: {
+      input: 'src/index.ts',
       output: {
         entryFileNames: 'module.js',
         chunkFileNames: 'assets/[name]-[hash].js',
@@ -18,4 +19,5 @@ export default defineConfig({
       },
     },
   },
+  publicDir: 'public',
 });

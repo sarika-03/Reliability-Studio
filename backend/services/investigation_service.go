@@ -1,0 +1,307 @@
+// Package services provides business logic for incident investigations
+package services
+
+import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"fmt"
+	"github.com/google/uuid"
+	"github.com/jmoiron/sqlx"
+	"go.uber.org/zap"
+	"time"
+)
+
+// InvestigationHypothesis represents a hypothesis during incident investigation
+type InvestigationHypothesis struct {
+	ID          uuid.UUID `json:"id" db:"id"`
+	IncidentID  uuid.UUID `json:"incident_id" db:"incident_id"`
+	Title       string    `json:"title" db:"title"`
+	Description string    `json:"description" db:"description"`
+	Status      string    `json:"status" db:"status"` // proposed, investigating, confirmed, rejected
+	Confidence  float64   `json:"confidence" db:"confidence"`
+	Evidence    []string  `json:"evidence"`
+	CreatedAt   time.Time `json:"created_at" db:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at" db:"updated_at"`
+}
+
+// InvestigationStep represents a step in the investigation workflow
+type InvestigationStep struct {
+	ID              uuid.UUID           `json:"id" db:"id"`
+	IncidentID      uuid.UUID           `json:"incident_id" db:"incident_id"`
+	HypothesisID    *uuid.UUID          `json:"hypothesis_id,omitempty" db:"hypothesis_id"`
+	Title           string              `json:"title" db:"title"`
+	Description     string              `json:"description" db:"description"`
+	Action          string              `json:"action" db:"action"` // investigate_logs, check_metrics, test_hypothesis, etc.
+	Status          string              `json:"status" db:"status"` // pending, in_progress, completed
+	FindingsJSON    json.RawMessage     `json:"findings,omitempty" db:"findings"`
+	Findings        map[string]interface{} `json:"-"`
+	AssignedTo      *string             `json:"assigned_to,omitempty" db:"assigned_to"`
+	CreatedAt       time.Time           `json:"created_at" db:"created_at"`
+	CompletedAt     *time.Time          `json:"completed_at,omitempty" db:"completed_at"`
+}
+
+// InvestigationService manages incident investigations
+type InvestigationService struct {
+	db     *sqlx.DB
+	logger *zap.Logger
+}
+
+// NewInvestigationService creates a new investigation service
+func NewInvestigationService(db *sql.DB, logger *zap.Logger) *InvestigationService {
+	return &InvestigationService{
+		db:     sqlx.NewDb(db, "postgres"),
+		logger: logger,
+	}
+}
+
+// CreateHypothesis creates a new investigation hypothesis
+func (s *InvestigationService) CreateHypothesis(ctx context.Context, incidentID string, title, description string) (*InvestigationHypothesis, error) {
+	incidentUUID, err := uuid.Parse(incidentID)
+	if err != nil {
+		return nil, err
+	}
+
+	hypothesis := &InvestigationHypothesis{
+		ID:          uuid.New(),
+		IncidentID:  incidentUUID,
+		Title:       title,
+		Description: description,
+		Status:      "proposed",
+		Confidence:  0.5,
+		CreatedAt:   time.Now(),
+		UpdatedAt:   time.Now(),
+	}
+
+	query := `
+		INSERT INTO investigation_hypotheses (id, incident_id, title, description, status, confidence, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+	`
+	_, err = s.db.ExecContext(ctx, query,
+		hypothesis.ID, hypothesis.IncidentID, hypothesis.Title, hypothesis.Description,
+		hypothesis.Status, hypothesis.Confidence, hypothesis.CreatedAt, hypothesis.UpdatedAt,
+	)
+	if err != nil {
+		s.logger.Error("Failed to create hypothesis", zap.Error(err))
+		return nil, err
+	}
+
+	return hypothesis, nil
+}
+
+// GetHypotheses retrieves all hypotheses for an incident
+func (s *InvestigationService) GetHypotheses(ctx context.Context, incidentID string) ([]InvestigationHypothesis, error) {
+	var hypotheses []InvestigationHypothesis
+	err := s.db.SelectContext(ctx, &hypotheses, `
+		SELECT id, incident_id, title, description, status, confidence, created_at, updated_at
+		FROM investigation_hypotheses
+		WHERE incident_id = $1
+		ORDER BY confidence DESC, created_at DESC
+	`, incidentID)
+
+	if err != nil && err != sql.ErrNoRows {
+		s.logger.Error("Failed to get hypotheses", zap.Error(err))
+		return nil, err
+	}
+
+	return hypotheses, nil
+}
+
+// UpdateHypothesis updates a hypothesis with new findings
+func (s *InvestigationService) UpdateHypothesis(ctx context.Context, hypothesisID string, status string, confidence float64) error {
+	query := `
+		UPDATE investigation_hypotheses
+		SET status = $1, confidence = $2, updated_at = $3
+		WHERE id = $4
+	`
+	_, err := s.db.ExecContext(ctx, query, status, confidence, time.Now(), hypothesisID)
+	if err != nil {
+		s.logger.Error("Failed to update hypothesis", zap.Error(err))
+		return err
+	}
+
+	return nil
+}
+
+// CreateInvestigationStep creates a new investigation step
+func (s *InvestigationService) CreateInvestigationStep(ctx context.Context, incidentID, title, action string) (*InvestigationStep, error) {
+	incidentUUID, err := uuid.Parse(incidentID)
+	if err != nil {
+		return nil, err
+	}
+
+	step := &InvestigationStep{
+		ID:          uuid.New(),
+		IncidentID:  incidentUUID,
+		Title:       title,
+		Action:      action,
+		Status:      "pending",
+		CreatedAt:   time.Now(),
+	}
+
+	query := `
+		INSERT INTO investigation_steps (id, incident_id, title, action, status, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6)
+	`
+	_, err = s.db.ExecContext(ctx, query,
+		step.ID, step.IncidentID, step.Title, step.Action, step.Status, step.CreatedAt,
+	)
+	if err != nil {
+		s.logger.Error("Failed to create investigation step", zap.Error(err))
+		return nil, err
+	}
+
+	return step, nil
+}
+
+// GetInvestigationSteps retrieves all investigation steps for an incident
+func (s *InvestigationService) GetInvestigationSteps(ctx context.Context, incidentID string) ([]InvestigationStep, error) {
+	var steps []InvestigationStep
+	err := s.db.SelectContext(ctx, &steps, `
+		SELECT id, incident_id, hypothesis_id, title, description, action, status, findings, assigned_to, created_at, completed_at
+		FROM investigation_steps
+		WHERE incident_id = $1
+		ORDER BY created_at
+	`, incidentID)
+
+	if err != nil && err != sql.ErrNoRows {
+		s.logger.Error("Failed to get investigation steps", zap.Error(err))
+		return nil, err
+	}
+
+	// Unmarshal findings JSON
+	for i := range steps {
+		if steps[i].FindingsJSON != nil {
+			json.Unmarshal(steps[i].FindingsJSON, &steps[i].Findings)
+		}
+	}
+
+	return steps, nil
+}
+
+// UpdateInvestigationStep updates an investigation step with findings
+func (s *InvestigationService) UpdateInvestigationStep(ctx context.Context, stepID string, status string, findings map[string]interface{}) error {
+	findingsJSON, _ := json.Marshal(findings)
+
+	query := `
+		UPDATE investigation_steps
+		SET status = $1, findings = $2
+	`
+	args := []interface{}{status, findingsJSON}
+
+	if status == "completed" {
+		query += `, completed_at = $3`
+		args = append(args, time.Now())
+	}
+
+	query += ` WHERE id = $` + fmt.Sprintf("%d", len(args)+1)
+	args = append(args, stepID)
+
+	_, err := s.db.ExecContext(ctx, query, args...)
+	if err != nil {
+		s.logger.Error("Failed to update investigation step", zap.Error(err))
+		return err
+	}
+
+	return nil
+}
+
+// GetRecommendedActions returns suggested investigation actions based on incident type
+func (s *InvestigationService) GetRecommendedActions(incidentTitle, severity string) []string {
+	actions := []string{}
+
+	// Always start with these
+	actions = append(actions, "Check error logs for patterns")
+	actions = append(actions, "Review recent deployments")
+
+	// Add severity-specific actions
+	switch severity {
+	case "critical":
+		actions = append(actions, "Check infrastructure status (CPU, memory, disk)")
+		actions = append(actions, "Review database connections and queries")
+		actions = append(actions, "Check external service dependencies")
+
+	case "high":
+		actions = append(actions, "Review application metrics")
+		actions = append(actions, "Check for resource constraints")
+
+	case "medium":
+		actions = append(actions, "Monitor error trends")
+		actions = append(actions, "Review application logs")
+	}
+
+	return actions
+}
+
+// GenerateRootCauseAnalysis generates a structured analysis of the incident
+func (s *InvestigationService) GenerateRootCauseAnalysis(ctx context.Context, incidentID string) (map[string]interface{}, error) {
+	// Get incident details
+	var incident struct {
+		ID              uuid.UUID
+		Title           string
+		Description     string
+		Severity        string
+		RootCause       *string
+		StartedAt       time.Time
+		DetectedAt      *time.Time
+		MitigatedAt     *time.Time
+		ResolvedAt      *time.Time
+	}
+
+	query := `
+		SELECT id, title, description, severity, root_cause, started_at, detected_at, mitigated_at, resolved_at
+		FROM incidents
+		WHERE id = $1
+	`
+	err := s.db.GetContext(ctx, &incident, query, incidentID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Get hypotheses
+	hypotheses, _ := s.GetHypotheses(ctx, incidentID)
+
+	// Get investigation steps
+	steps, _ := s.GetInvestigationSteps(ctx, incidentID)
+
+	// Build RCA
+	rca := map[string]interface{}{
+		"incident_id":    incidentID,
+		"title":          incident.Title,
+		"severity":       incident.Severity,
+		"started_at":     incident.StartedAt,
+		"duration":       calculateDuration(incident.StartedAt, incident.ResolvedAt),
+		"hypotheses":     hypotheses,
+		"investigation":  steps,
+		"root_cause":     incident.RootCause,
+		"timeline":       buildTimeline(incident.StartedAt, incident.DetectedAt, incident.MitigatedAt, incident.ResolvedAt),
+	}
+
+	return rca, nil
+}
+
+// Helper functions
+func calculateDuration(start time.Time, end *time.Time) string {
+	if end == nil {
+		return fmt.Sprintf("%.1f minutes", time.Since(start).Minutes())
+	}
+	return fmt.Sprintf("%.1f minutes", end.Sub(start).Minutes())
+}
+
+func buildTimeline(startedAt time.Time, detectedAt, mitigatedAt, resolvedAt *time.Time) map[string]interface{} {
+	timeline := map[string]interface{}{
+		"started": startedAt,
+	}
+
+	if detectedAt != nil {
+		timeline["detected"] = detectedAt
+	}
+	if mitigatedAt != nil {
+		timeline["mitigated"] = mitigatedAt
+	}
+	if resolvedAt != nil {
+		timeline["resolved"] = resolvedAt
+	}
+
+	return timeline
+}

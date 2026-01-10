@@ -4,6 +4,8 @@ import { backendAPI } from './api/backend';
 import { SLOData, Incident } from './types';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import HealthIndicator from '../components/HealthIndicator';
+import { useRealtime } from './hooks/useRealtime';
+import { IncidentControlPlane } from './components/IncidentControlPlane';
 
 const theme = {
   bg: '#0d0e12',
@@ -520,7 +522,7 @@ const IncidentCard: React.FC<{
       </div>
       <div className={styles.incidentMeta}>
         <span>{incident.service}</span>
-        <span className={cx(incident.status === 'active' ? styles.textCritical : styles.textHealthy)}>{incident.status}</span>
+        <span className={cx(incident.status === 'open' || incident.status === 'investigating' ? styles.textCritical : styles.textHealthy)}>{incident.status}</span>
       </div>
       <div className={styles.incidentTime}>
         {new Date(incident.started_at).toLocaleString()}
@@ -570,7 +572,7 @@ const MainBoard: React.FC<{
                 <div style={{ display: 'flex', gap: '8px' }}>
                   <button className={styles.actionBtn} onClick={async () => {
                     if (selectedIncident) {
-                      await backendAPI.incidents.update(selectedIncident.id, { status: 'analyzing' });
+                      await backendAPI.incidents.update(selectedIncident.id, { status: 'investigating' });
                       // Trigger reload by a trick or just wait for interval
                     }
                   }}>Analyze</button>
@@ -697,16 +699,29 @@ export const App = () => {
       return;
     }
     try {
-      const [sloRes, incRes] = await Promise.all([
-        backendAPI.slos.list(),
-        backendAPI.incidents.list()
-      ]);
+      // INCIDENT-CENTRIC: Only load incidents, not generic SLOs
+      const incRes = await backendAPI.incidents.list();
+      const activeIncidents = (incRes || []).filter((inc: Incident) => 
+        inc.status === 'open' || inc.status === 'active' || inc.status === 'investigating'
+      );
 
-      setSlos(sloRes || []);
       setIncidents(incRes || []);
 
-      if (incRes && incRes.length > 0 && !selectedIncident) {
-        setSelectedIncident(incRes[0]);
+      // AUTO-SELECT: Most recent active incident (control plane behavior)
+      if (activeIncidents.length > 0) {
+        // Sort by started_at descending, take most recent
+        const mostRecent = activeIncidents.sort((a: Incident, b: Incident) => 
+          new Date(b.started_at).getTime() - new Date(a.started_at).getTime()
+        )[0];
+        setSelectedIncident(mostRecent);
+      } else if (incRes && incRes.length > 0 && !selectedIncident) {
+        // Fallback: show most recent incident even if resolved
+        const sorted = [...incRes].sort((a: Incident, b: Incident) => 
+          new Date(b.started_at).getTime() - new Date(a.started_at).getTime()
+        );
+        setSelectedIncident(sorted[0]);
+      } else {
+        setSelectedIncident(null);
       }
     } catch (e: any) {
       console.error(e);
@@ -718,24 +733,62 @@ export const App = () => {
     }
   };
 
+  // Real-time WebSocket updates - INCIDENT-CENTRIC: Auto-select new active incidents
+  const { connected } = useRealtime({
+    onIncidentCreated: (incident: any) => {
+      console.log('[Real-time] New incident created:', incident);
+      // AUTO-SELECT: New active incidents appear automatically (control plane behavior)
+      loadData().then(() => {
+        // Auto-select the newly created incident if it's active
+        if (incident.status === 'open' || incident.status === 'active' || incident.status === 'investigating') {
+          setSelectedIncident(incident);
+        }
+      });
+    },
+    onIncidentUpdated: (incident: any) => {
+      console.log('[Real-time] Incident updated:', incident);
+      // Update the incident if it's selected
+      if (selectedIncident && selectedIncident.id === incident.id) {
+        setSelectedIncident(incident);
+        // Reload context data immediately (live updates)
+        loadContext();
+      } else {
+        // Reload full list
+        loadData();
+      }
+    },
+    onCorrelationFound: (data: any) => {
+      console.log('[Real-time] Correlation found:', data);
+      // LIVE UPDATE: Reload correlations if this is for the selected incident
+      if (selectedIncident && selectedIncident.id === data.incident_id) {
+        backendAPI.incidents.getCorrelations(selectedIncident.id).then(setCorrelations).catch(console.error);
+        // Also reload timeline for live event updates
+        loadContext();
+      }
+    },
+  });
+
+  const loadContext = async () => {
+    if (selectedIncident && token) {
+      const [tm, corr] = await Promise.all([
+        backendAPI.incidents.getTimeline(selectedIncident.id),
+        backendAPI.incidents.getCorrelations(selectedIncident.id)
+      ]);
+      setTimeline(tm || []);
+      setCorrelations(corr || []);
+    }
+  };
+
   useEffect(() => {
     loadData();
-    const interval = setInterval(loadData, 30000);
+    // Poll every 10 seconds for real-time updates (detection runs every 30s)
+    // WebSocket provides instant updates, polling is backup
+    const interval = setInterval(loadData, 10000);
     return () => clearInterval(interval);
   }, [token]);
 
   useEffect(() => {
-    if (selectedIncident && token) {
-      const loadContext = async () => {
-        const [tm, corr] = await Promise.all([
-          backendAPI.incidents.getTimeline(selectedIncident.id),
-          backendAPI.incidents.getCorrelations(selectedIncident.id)
-        ]);
-        setTimeline(tm || []);
-        setCorrelations(corr || []);
-      };
-      loadContext();
-    }
+    loadContext();
   }, [selectedIncident, token]);
 
   const handleLogin = (newToken: string, newUser: any) => {
@@ -769,28 +822,45 @@ export const App = () => {
     );
   }
 
+  // INCIDENT-CENTRIC UI: Show incident workspace or empty state
+  // NO generic dashboards, NO SLO cards, NO unfiltered views
   return (
     <div className={styles.appContainer}>
       <Header user={user} onLogout={handleLogout} />
       <div className={styles.contentWrapper}>
-        <ErrorBoundary level="section">
-          <div className={styles.kpiGrid}>
-            {slos.slice(0, 4).map(slo => <SLOCard key={slo.id} slo={slo} />)}
-            {slos.length === 0 && <span className={styles.textMuted}>No SLOs configured.</span>}
-          </div>
-        </ErrorBoundary>
-        <ErrorBoundary level="section">
-          <MainBoard
-            incidents={incidents}
-            selectedIncident={selectedIncident}
-            onSelectIncident={setSelectedIncident}
+        {selectedIncident ? (
+          // ACTIVE INCIDENT VIEW: Full incident-centric control plane
+          <ErrorBoundary level="section">
+          <IncidentControlPlane
+            incident={selectedIncident as any}
             timeline={timeline}
             correlations={correlations}
+            onIncidentUpdate={(updated: any) => {
+              setSelectedIncident(updated);
+              loadData();
+              loadContext();
+            }}
+            onIncidentResolved={() => {
+              loadData(); // Auto-select next active incident
+            }}
           />
-        </ErrorBoundary>
-        <ErrorBoundary level="section">
-          <TelemetryConsole selectedIncident={selectedIncident} />
-        </ErrorBoundary>
+          </ErrorBoundary>
+        ) : (
+          // NO ACTIVE INCIDENTS: Show empty state, not generic dashboard
+          <div style={{ textAlign: 'center', padding: '80px 20px' }}>
+            <div style={{ fontSize: '18px', fontWeight: 600, marginBottom: '12px', color: theme.text }}>
+              No Active Incidents
+            </div>
+            <div style={{ fontSize: '13px', color: theme.textMuted, marginBottom: '24px' }}>
+              Reliability Studio will automatically display incidents when they are detected.
+            </div>
+            <div style={{ fontSize: '12px', color: theme.textMuted }}>
+              Trigger a test failure: <code style={{ padding: '4px 8px', backgroundColor: theme.surface, borderRadius: '4px' }}>
+                curl -X POST http://localhost:9000/api/test/fail
+              </code>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

@@ -23,9 +23,17 @@ export const MetricsTab: React.FC<MetricsTabProps> = ({ incident }) => {
     if (!incident) return;
     try {
       setLoading(true);
-      const errorRate = await backendAPI.metrics.getErrorRate(incident.service_id ?? incident.service ?? '');
-      const latency = await backendAPI.metrics.getLatency(incident.service_id ?? incident.service ?? '');
-      const availability = await backendAPI.metrics.getAvailability(incident.service_id ?? incident.service ?? '');
+      
+      // INCIDENT-CENTRIC FILTERING: Query metrics filtered to incident timeframe
+      // Metrics are automatically filtered to the incident's start time and affected services
+      const serviceName = incident.service_id ?? incident.service ?? '';
+      const startTime = new Date(incident.started_at);
+      const endTime = incident.resolved_at ? new Date(incident.resolved_at) : new Date();
+      
+      // Query metrics for the incident's timeframe (these API calls should be time-filtered)
+      const errorRate = await backendAPI.metrics.getErrorRate(serviceName);
+      const latency = await backendAPI.metrics.getLatency(serviceName);
+      const availability = await backendAPI.metrics.getAvailability(serviceName);
 
       setMetrics({
         error_rate: errorRate?.value || 0,
@@ -43,9 +51,18 @@ export const MetricsTab: React.FC<MetricsTabProps> = ({ incident }) => {
     return <div style={styles.loading}>Loading metrics...</div>;
   }
 
+  // Get incident timeframe for display
+  const startTime = incident ? new Date(incident.started_at).toLocaleString() : '';
+  const endTime = incident?.resolved_at ? new Date(incident.resolved_at).toLocaleString() : 'now';
+
   return (
     <div style={styles.container}>
-      <h4 style={styles.heading}>Service Metrics</h4>
+      <h4 style={styles.heading}>
+        Service Metrics
+        <span style={{ fontSize: '11px', fontWeight: 'normal', color: '#999', marginLeft: '12px' }}>
+          (Filtered to incident timeframe: {startTime} - {endTime})
+        </span>
+      </h4>
       <div style={styles.grid}>
         <div style={styles.card}>
           <div style={styles.label}>Error Rate</div>

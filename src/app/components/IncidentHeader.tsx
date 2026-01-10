@@ -97,6 +97,44 @@ export const IncidentHeader: React.FC<IncidentHeaderProps> = ({ incident, onUpda
           </div>
         )}
       </div>
+
+      {/* Incident Resolution Controls */}
+      {incident.status !== 'resolved' && (
+        <div style={styles.actionSection}>
+          {incident.status === 'open' && (
+            <button 
+              onClick={async () => {
+                try {
+                  await incidentsApi.update(incident.id, { status: 'investigating' });
+                  onUpdate();
+                } catch (error) {
+                  console.error('Failed to update incident status:', error);
+                }
+              }}
+              style={styles.actionButton}
+            >
+              Start Investigating
+            </button>
+          )}
+          {(incident.status === 'open' || incident.status === 'investigating' || incident.status === 'active') && (
+            <button 
+              onClick={async () => {
+                try {
+                  await incidentsApi.update(incident.id, { status: 'resolved' });
+                  alert('Incident resolved! The system will reflect this change immediately.');
+                  onUpdate();
+                } catch (error) {
+                  console.error('Failed to resolve incident:', error);
+                  alert('Failed to resolve incident. Please try again.');
+                }
+              }}
+              style={{...styles.actionButton, backgroundColor: '#388e3c'}}
+            >
+              Mark Resolved
+            </button>
+          )}
+        </div>
+      )}
     </div>
   );
 };
@@ -178,5 +216,23 @@ const styles = {
     gap: '24px',
     fontSize: '13px',
     color: '#666',
+    marginBottom: '16px',
+  } as React.CSSProperties,
+  actionSection: {
+    display: 'flex',
+    gap: '12px',
+    marginTop: '16px',
+    paddingTop: '16px',
+    borderTop: '1px solid #ddd',
+  } as React.CSSProperties,
+  actionButton: {
+    padding: '10px 20px',
+    backgroundColor: '#1976d2',
+    color: 'white',
+    border: 'none',
+    borderRadius: '4px',
+    cursor: 'pointer',
+    fontSize: '14px',
+    fontWeight: 600,
   } as React.CSSProperties,
 };

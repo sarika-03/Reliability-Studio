@@ -17,15 +17,18 @@ import (
 	"github.com/gorilla/mux"
 	"github.com/rs/cors"
 	_ "net/http/pprof"
+	"go.uber.org/zap"
 
 	"github.com/sarika-03/Reliability-Studio/clients"
 	"github.com/sarika-03/Reliability-Studio/correlation"
 	"github.com/sarika-03/Reliability-Studio/database"
+	"github.com/sarika-03/Reliability-Studio/detection"
 	"github.com/sarika-03/Reliability-Studio/handlers"
 	"github.com/sarika-03/Reliability-Studio/middleware"
 	"github.com/sarika-03/Reliability-Studio/services"
 	"github.com/sarika-03/Reliability-Studio/stability"
 	"github.com/sarika-03/Reliability-Studio/utils"
+	"github.com/sarika-03/Reliability-Studio/websocket"
 )
 
 type Server struct {
@@ -36,9 +39,11 @@ type Server struct {
 	sloService         *services.SLOService
 	timelineService    *services.TimelineService
 	correlationEngine  *correlation.CorrelationEngine
+	incidentDetector   *detection.IncidentDetector
 	healthChecker      *stability.HealthChecker
 	circuitBreaker     *stability.CircuitBreakerManager
 	logger             *utils.StructuredLogger
+	realtimeServer     *websocket.RealtimeServer
 }
 
 func main() {
@@ -82,15 +87,24 @@ func main() {
 		k8sInterface = k8sClient // Interface is populated
 	}
 
+	// Initialize structured logger first (needed by services)
+	log.Println("📝 Initializing structured logger...")
+	structuredLogger := utils.NewStructuredLogger(lokiClient, "reliability-studio")
+
+	// Initialize zap logger for services that require it
+	zapLogger, err := zap.NewProduction()
+	if err != nil {
+		log.Printf("Warning: Failed to initialize zap logger: %v, using standard logger", err)
+		zapLogger = zap.NewNop() // No-op logger as fallback
+	}
+	defer zapLogger.Sync()
+
 	// Initialize services
 	log.Println("⚙️  Initializing services...")
 	sloService := services.NewSLOService(db, promClient)
 	timelineService := services.NewTimelineService(db)
+	investigationService := services.NewInvestigationService(db, zapLogger)
 	correlationEngine := correlation.NewCorrelationEngine(db, promClient, k8sInterface, lokiClient)
-
-	// Initialize structured logger
-	log.Println("📝 Initializing structured logger...")
-	structuredLogger := utils.NewStructuredLogger(lokiClient, "reliability-studio")
 
 	// Initialize stability systems
 	log.Println("🛡️  Initializing stability systems...")
@@ -116,6 +130,67 @@ func main() {
 		circuitBreaker:    circuitBreaker,
 	}
 
+	// Initialize WebSocket server for real-time updates
+	log.Println("🔌 Initializing WebSocket server...")
+	realtimeServer := websocket.NewRealtimeServer()
+	realtimeServer.Start()
+	server.realtimeServer = realtimeServer
+
+	// Initialize incident detector
+	log.Println("🔍 Initializing incident detector...")
+	detector := detection.NewIncidentDetector(db, promClient, lokiClient, k8sClient)
+	server.incidentDetector = detector
+
+	// Set correlation callback to trigger correlation when incidents are detected
+	detector.SetCorrelationCallback(func(ctx context.Context, incidentID, service string, timestamp time.Time) {
+		log.Printf("🔗 Triggering correlation for incident %s (service: %s)", incidentID, service)
+		
+		// Wait a moment for DB consistency, then fetch incident data for WebSocket broadcast
+		time.Sleep(100 * time.Millisecond)
+		var id, title, severity, status, serviceName string
+		var startedAt time.Time
+		err := db.QueryRow(`
+			SELECT i.id, i.title, i.severity, i.status, COALESCE(s.name, 'unknown') as service, i.started_at
+			FROM incidents i
+			LEFT JOIN services s ON i.service_id = s.id
+			WHERE i.id = $1
+		`, incidentID).Scan(&id, &title, &severity, &status, &serviceName, &startedAt)
+		if err == nil {
+			incidentData := map[string]interface{}{
+				"id":         id,
+				"title":      title,
+				"severity":   severity,
+				"status":     status,
+				"service":    serviceName,
+				"started_at": startedAt,
+			}
+			log.Printf("📡 Broadcasting incident created: id=%s, title=%s", id, title)
+			realtimeServer.BroadcastIncidentCreated(incidentData)
+		} else {
+			log.Printf("⚠️  Failed to fetch incident for broadcast: %v", err)
+		}
+		
+		// Run correlation
+		ic, err := correlationEngine.CorrelateIncident(ctx, incidentID, service, "default", timestamp)
+		if err != nil {
+			log.Printf("Warning: Correlation failed for incident %s: %v", incidentID, err)
+		} else {
+			log.Printf("✅ Correlation completed for incident %s: %d correlations found", incidentID, len(ic.Correlations))
+			// Broadcast correlation results
+			if len(ic.Correlations) > 0 {
+				realtimeServer.BroadcastCorrelationFound(map[string]interface{}{
+					"incident_id": incidentID,
+					"correlations": ic.Correlations,
+				})
+			}
+		}
+	})
+
+	// Start incident detection (run every 30 seconds for faster response)
+	log.Println("⚡ Starting continuous incident detection...")
+	ctx, cancel := context.WithCancel(context.Background())
+	detector.Start(ctx, 30*time.Second)
+
 	// Setup router
 	router := mux.NewRouter()
 
@@ -125,6 +200,10 @@ func main() {
 	router.Use(middleware.SecurityHeadersMiddleware)
 	router.Use(middleware.RateLimitingMiddleware)
 	
+	// Initialize detection handlers
+	handlers.InitDetectionHandlers(detector)
+	handlers.InitInvestigationHandlers(investigationService)
+
 	// Add telemetry middleware to capture all metrics and logs
 	telemetryMiddleware := middleware.NewTelemetryMiddleware(promClient, lokiClient, "reliability-studio")
 	router.Use(telemetryMiddleware.Middleware)
@@ -135,6 +214,9 @@ func main() {
 	router.HandleFunc("/api/auth/login", middleware.LoginHandler(db)).Methods("POST")
 	router.HandleFunc("/api/auth/register", middleware.RegisterHandler(db)).Methods("POST")
 	router.HandleFunc("/api/auth/refresh", middleware.RefreshTokenHandler()).Methods("POST")
+	
+	// WebSocket route (public for now, can add auth later)
+	router.HandleFunc("/api/realtime", realtimeServer.HandleWebSocket)
 
 	// Protected routes
 	api := router.PathPrefix("/api").Subrouter()
@@ -147,6 +229,18 @@ func main() {
 	api.HandleFunc("/incidents/{id}", server.updateIncidentHandler).Methods("PATCH")
 	api.HandleFunc("/incidents/{id}/timeline", server.getIncidentTimelineHandler).Methods("GET")
 	api.HandleFunc("/incidents/{id}/correlations", server.getIncidentCorrelationsHandler).Methods("GET")
+
+	// Investigation routes (guided RCA workflows)
+	api.HandleFunc("/incidents/{id}/investigation/hypotheses", handlers.GetInvestigationHypotheses).Methods("GET")
+	api.HandleFunc("/incidents/{id}/investigation/hypotheses", handlers.CreateInvestigationHypothesis).Methods("POST")
+	api.HandleFunc("/incidents/{id}/investigation/steps", handlers.GetInvestigationSteps).Methods("GET")
+	api.HandleFunc("/incidents/{id}/investigation/steps", handlers.CreateInvestigationStep).Methods("POST")
+	api.HandleFunc("/incidents/{id}/investigation/rca", handlers.GetRootCauseAnalysis).Methods("GET")
+	api.HandleFunc("/incidents/{id}/investigation/recommended-actions", handlers.GetRecommendedActions).Methods("GET")
+
+	// Detection rules and alerts
+	api.HandleFunc("/detection/rules", handlers.GetDetectionRules).Methods("GET")
+	api.HandleFunc("/detection/status", handlers.GetDetectionStatus).Methods("GET")
 
 	// SLO routes
 	api.HandleFunc("/slos", server.getSLOsHandler).Methods("GET")
@@ -239,8 +333,15 @@ func main() {
 
 		log.Println("🛑 Shutting down server...")
 
+		// Stop incident detector
+		if detector != nil {
+			log.Println("⛔ Stopping incident detector...")
+			detector.Stop()
+		}
+
 		// Cancel background jobs
 		cancelBackgroundJobs()
+		cancel() // Cancel the detector context
 
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
@@ -563,6 +664,33 @@ func (s *Server) updateIncidentHandler(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, "Failed to update incident")
 		return
+	}
+
+	// Fetch updated incident for broadcast
+	var id, title, severity, status, serviceName string
+	var startedAt time.Time
+	var resolvedAt sql.NullTime
+	err = s.db.QueryRow(`
+		SELECT i.id, i.title, i.severity, i.status, COALESCE(s.name, 'unknown') as service, i.started_at, i.resolved_at
+		FROM incidents i
+		LEFT JOIN services s ON i.service_id = s.id
+		WHERE i.id = $1
+	`, incidentID).Scan(&id, &title, &severity, &status, &serviceName, &startedAt, &resolvedAt)
+	
+	if err == nil && s.realtimeServer != nil {
+		incidentData := map[string]interface{}{
+			"id":         id,
+			"title":      title,
+			"severity":   severity,
+			"status":     status,
+			"service":    serviceName,
+			"started_at": startedAt,
+		}
+		if resolvedAt.Valid {
+			incidentData["resolved_at"] = resolvedAt.Time
+		}
+		log.Printf("📡 Broadcasting incident update: id=%s, status=%s", id, status)
+		s.realtimeServer.BroadcastIncidentUpdated(incidentData)
 	}
 
 	respondJSON(w, http.StatusOK, map[string]string{"status": "updated"})

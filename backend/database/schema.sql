@@ -149,6 +149,18 @@ CREATE TABLE metrics_cache (
     UNIQUE(metric_key, service_id, timestamp)
 );
 
+-- Correlations (for incident correlation engine)
+CREATE TABLE correlations (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    incident_id UUID REFERENCES incidents(id) ON DELETE CASCADE,
+    correlation_type VARCHAR(50) NOT NULL,
+    source_type VARCHAR(50) NOT NULL,
+    source_id VARCHAR(255) NOT NULL,
+    confidence_score DECIMAL(3,2) NOT NULL CHECK (confidence_score >= 0 AND confidence_score <= 1),
+    details JSONB DEFAULT '{}',
+    created_at TIMESTAMP DEFAULT NOW()
+);
+
 -- Indexes for performance
 CREATE INDEX idx_incidents_status ON incidents(status);
 CREATE INDEX idx_incidents_severity ON incidents(severity);
@@ -214,3 +226,35 @@ INSERT INTO correlation_rules (name, description, rule_type, query, threshold_va
      'histogram_quantile(0.95, rate(http_request_duration_seconds_bucket[5m])) > 1',
      1.0, 'high', true)
 ON CONFLICT (name) DO NOTHING;
+
+-- Investigation Hypotheses (for RCA workflows)
+CREATE TABLE investigation_hypotheses (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    incident_id UUID REFERENCES incidents(id) ON DELETE CASCADE,
+    title VARCHAR(500) NOT NULL,
+    description TEXT,
+    status VARCHAR(50) DEFAULT 'proposed' CHECK (status IN ('proposed', 'investigating', 'confirmed', 'rejected')),
+    confidence FLOAT DEFAULT 0.5 CHECK (confidence >= 0 AND confidence <= 1.0),
+    created_at TIMESTAMP DEFAULT NOW(),
+    updated_at TIMESTAMP DEFAULT NOW()
+);
+
+-- Investigation Steps (for guided workflows)
+CREATE TABLE investigation_steps (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    incident_id UUID REFERENCES incidents(id) ON DELETE CASCADE,
+    hypothesis_id UUID REFERENCES investigation_hypotheses(id) ON DELETE SET NULL,
+    title VARCHAR(500) NOT NULL,
+    description TEXT,
+    action VARCHAR(100) NOT NULL, -- investigate_logs, check_metrics, test_hypothesis, etc.
+    status VARCHAR(50) DEFAULT 'pending' CHECK (status IN ('pending', 'in_progress', 'completed', 'skipped')),
+    findings JSONB DEFAULT '{}',
+    assigned_to VARCHAR(255),
+    created_at TIMESTAMP DEFAULT NOW(),
+    completed_at TIMESTAMP
+);
+
+-- Create indexes for investigations
+CREATE INDEX idx_hypotheses_incident ON investigation_hypotheses(incident_id);
+CREATE INDEX idx_steps_incident ON investigation_steps(incident_id);
+CREATE INDEX idx_steps_status ON investigation_steps(status);

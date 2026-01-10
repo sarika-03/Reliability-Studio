@@ -173,6 +173,18 @@ export const backendAPI = {
   logs: {
     getErrors: (service: string) => apiFetch<any[]>(`/logs/${service}/errors`),
     search: (service: string, query: string) => apiFetch<any[]>(`/logs/${service}/search?q=${encodeURIComponent(query)}`),
+  },
+  detection: {
+    getRules: () => apiFetch<any>("/detection/rules"),
+    getStatus: () => apiFetch<any>("/detection/status"),
+  },
+  investigation: {
+    getHypotheses: (incidentId: string) => apiFetch<any[]>(`/incidents/${incidentId}/investigation/hypotheses`),
+    createHypothesis: (incidentId: string, data: any) => apiFetch<any>(`/incidents/${incidentId}/investigation/hypotheses`, { method: 'POST', body: data }),
+    getSteps: (incidentId: string) => apiFetch<any[]>(`/incidents/${incidentId}/investigation/steps`),
+    createStep: (incidentId: string, data: any) => apiFetch<any>(`/incidents/${incidentId}/investigation/steps`, { method: 'POST', body: data }),
+    getRCA: (incidentId: string) => apiFetch<any>(`/incidents/${incidentId}/investigation/rca`),
+    getRecommendedActions: (incidentId: string) => apiFetch<any>(`/incidents/${incidentId}/investigation/recommended-actions`),
   }
 };
 
