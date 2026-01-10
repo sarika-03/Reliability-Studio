@@ -480,7 +480,9 @@ const SLOCard: React.FC<{ slo: SLOData }> = ({ slo }) => {
 
   React.useEffect(() => {
     backendAPI.slos.getHistory(slo.id).then((data: any[]) => {
-      setHistory(data.map((h: any) => h.value));
+      if (Array.isArray(data)) {
+        setHistory(data.map((h: any) => h.value));
+      }
     }).catch(console.error);
   }, [slo.id]);
 
@@ -542,7 +544,7 @@ const MainBoard: React.FC<{
     <div className={styles.panel}>
       <div className={styles.panelHeader}>Active & Recent Incidents</div>
       <div className={styles.incidentList}>
-        {incidents.length > 0 ? (
+        {Array.isArray(incidents) && incidents.length > 0 ? (
           incidents.map((incident) => (
             <IncidentCard
               key={incident.id}
@@ -699,29 +701,29 @@ export const App = () => {
       return;
     }
     try {
-      // INCIDENT-CENTRIC: Only load incidents, not generic SLOs
-      const incRes = await backendAPI.incidents.list();
-      const activeIncidents = (incRes || []).filter((inc: Incident) => 
+      const [incRes, sloRes] = await Promise.all([
+        backendAPI.incidents.list(),
+        backendAPI.slos.list()
+      ]);
+
+      setIncidents(incRes || []);
+      setSlos(sloRes || []);
+
+      const activeIncidents = (incRes || []).filter((inc: Incident) =>
         inc.status === 'open' || inc.status === 'active' || inc.status === 'investigating'
       );
 
-      setIncidents(incRes || []);
-
-      // AUTO-SELECT: Most recent active incident (control plane behavior)
-      if (activeIncidents.length > 0) {
-        // Sort by started_at descending, take most recent
-        const mostRecent = activeIncidents.sort((a: Incident, b: Incident) => 
+      // AUTO-SELECT: Most recent active incident if none selected
+      if (!selectedIncident && activeIncidents.length > 0) {
+        const mostRecent = activeIncidents.sort((a: Incident, b: Incident) =>
           new Date(b.started_at).getTime() - new Date(a.started_at).getTime()
         )[0];
         setSelectedIncident(mostRecent);
-      } else if (incRes && incRes.length > 0 && !selectedIncident) {
-        // Fallback: show most recent incident even if resolved
-        const sorted = [...incRes].sort((a: Incident, b: Incident) => 
+      } else if (!selectedIncident && incRes && incRes.length > 0) {
+        const sorted = [...incRes].sort((a: Incident, b: Incident) =>
           new Date(b.started_at).getTime() - new Date(a.started_at).getTime()
         );
         setSelectedIncident(sorted[0]);
-      } else {
-        setSelectedIncident(null);
       }
     } catch (e: any) {
       console.error(e);
@@ -828,39 +830,25 @@ export const App = () => {
     <div className={styles.appContainer}>
       <Header user={user} onLogout={handleLogout} />
       <div className={styles.contentWrapper}>
-        {selectedIncident ? (
-          // ACTIVE INCIDENT VIEW: Full incident-centric control plane
-          <ErrorBoundary level="section">
-          <IncidentControlPlane
-            incident={selectedIncident as any}
-            timeline={timeline}
-            correlations={correlations}
-            onIncidentUpdate={(updated: any) => {
-              setSelectedIncident(updated);
-              loadData();
-              loadContext();
-            }}
-            onIncidentResolved={() => {
-              loadData(); // Auto-select next active incident
-            }}
-          />
-          </ErrorBoundary>
-        ) : (
-          // NO ACTIVE INCIDENTS: Show empty state, not generic dashboard
-          <div style={{ textAlign: 'center', padding: '80px 20px' }}>
-            <div style={{ fontSize: '18px', fontWeight: 600, marginBottom: '12px', color: theme.text }}>
-              No Active Incidents
+        <div className={styles.kpiGrid}>
+          {Array.isArray(slos) && slos.length > 0 ? (
+            slos.map((slo) => <SLOCard key={slo.id} slo={slo} />)
+          ) : (
+            <div className={styles.textMuted} style={{ gridColumn: 'span 4' }}>
+              No SLOs configured.
             </div>
-            <div style={{ fontSize: '13px', color: theme.textMuted, marginBottom: '24px' }}>
-              Reliability Studio will automatically display incidents when they are detected.
-            </div>
-            <div style={{ fontSize: '12px', color: theme.textMuted }}>
-              Trigger a test failure: <code style={{ padding: '4px 8px', backgroundColor: theme.surface, borderRadius: '4px' }}>
-                curl -X POST http://localhost:9000/api/test/fail
-              </code>
-            </div>
-          </div>
-        )}
+          )}
+        </div>
+
+        <MainBoard
+          incidents={incidents}
+          selectedIncident={selectedIncident}
+          onSelectIncident={setSelectedIncident}
+          timeline={timeline}
+          correlations={correlations}
+        />
+
+        <TelemetryConsole selectedIncident={selectedIncident} />
       </div>
     </div>
   );

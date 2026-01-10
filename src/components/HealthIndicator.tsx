@@ -224,12 +224,12 @@ const HealthIndicator: React.FC<HealthIndicatorProps> = ({
 
           {/* Components List */}
           <div style={{ padding: '8px 0' }}>
-            {systemHealth.components.map((component, idx) => (
+            {(systemHealth.components || []).map((component, idx) => (
               <div
                 key={component.name}
                 style={{
                   padding: '8px 16px',
-                  borderBottom: idx < systemHealth.components.length - 1 ? '1px solid #f3f4f6' : 'none',
+                  borderBottom: idx < (systemHealth.components || []).length - 1 ? '1px solid #f3f4f6' : 'none',
                   display: 'flex',
                   alignItems: 'center',
                   gap: '8px',
