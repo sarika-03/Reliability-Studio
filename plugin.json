@@ -23,21 +23,12 @@
       }
     ],
     "links": [
-      {
-        "name": "GitHub",
-        "url": "https://github.com/sarika-03/Reliability-Studio"
-      },
-      {
-        "name": "Documentation",
-        "url": "https://github.com/sarika-03/Reliability-Studio/blob/main/README.md"
-      },
-      {
-        "name": "Changelog",
-        "url": "https://github.com/sarika-03/Reliability-Studio/blob/main/CHANGELOG.md"
-      }
+      { "name": "GitHub", "url": "https://github.com/sarika-03/Reliability-Studio" },
+      { "name": "Documentation", "url": "https://github.com/sarika-03/Reliability-Studio/blob/main/README.md" },
+      { "name": "Changelog", "url": "https://github.com/sarika-03/Reliability-Studio/blob/main/CHANGELOG.md" }
     ]
   },
   "dependencies": {
-    "grafanaDependency": ">=10.0.0"
+    "grafanaVersion": ">=12.0.0"
   }
 }
