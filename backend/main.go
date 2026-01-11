@@ -141,6 +141,11 @@ func main() {
 	detector := detection.NewIncidentDetector(db, promClient, lokiClient, k8sClient)
 	server.incidentDetector = detector
 
+	// Set timeline callback for real-time updates
+	detector.SetTimelineCallback(func(event interface{}) {
+		realtimeServer.BroadcastTimelineEvent(event)
+	})
+
 	// Set correlation callback to trigger correlation when incidents are detected
 	detector.SetCorrelationCallback(func(ctx context.Context, incidentID, service string, timestamp time.Time) {
 		log.Printf("🔗 Triggering correlation for incident %s (service: %s)", incidentID, service)
@@ -229,6 +234,7 @@ func main() {
 	api.HandleFunc("/incidents/{id}", server.updateIncidentHandler).Methods("PATCH")
 	api.HandleFunc("/incidents/{id}/timeline", server.getIncidentTimelineHandler).Methods("GET")
 	api.HandleFunc("/incidents/{id}/correlations", server.getIncidentCorrelationsHandler).Methods("GET")
+	api.HandleFunc("/incidents/{id}/analysis", server.getIncidentAnalysisHandler).Methods("GET")
 
 	// Investigation routes (guided RCA workflows)
 	api.HandleFunc("/incidents/{id}/investigation/hypotheses", handlers.GetInvestigationHypotheses).Methods("GET")
@@ -266,6 +272,9 @@ func main() {
 	// Logs routes
 	api.HandleFunc("/logs/{service}/errors", server.getErrorLogsHandler).Methods("GET")
 	api.HandleFunc("/logs/{service}/search", server.searchLogsHandler).Methods("GET")
+
+	// Services route (public for service selector)
+	api.HandleFunc("/services", server.getServicesHandler).Methods("GET")
 
 	// Admin routes
 	admin := api.PathPrefix("/admin").Subrouter()
@@ -722,6 +731,23 @@ func (s *Server) getIncidentCorrelationsHandler(w http.ResponseWriter, r *http.R
 	respondJSON(w, http.StatusOK, correlations)
 }
 
+// getIncidentAnalysisHandler exposes high-level incident intelligence:
+// - root_cause_summary
+// - incident_confidence
+// - correlation signals already saved by the engine
+func (s *Server) getIncidentAnalysisHandler(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	incidentID := vars["id"]
+
+	analysis, err := s.correlationEngine.GetIncidentAnalysis(context.Background(), incidentID)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, "Failed to get incident analysis")
+		return
+	}
+
+	respondJSON(w, http.StatusOK, analysis)
+}
+
 func (s *Server) getSLOsHandler(w http.ResponseWriter, r *http.Request) {
 	slos, err := s.sloService.GetAllSLOs(context.Background())
 	if err != nil {
@@ -796,13 +822,13 @@ func (s *Server) calculateSLOHandler(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	sloID := vars["id"]
 
-	slo, err := s.sloService.CalculateSLO(context.Background(), sloID)
+	analysis, err := s.sloService.CalculateSLO(context.Background(), sloID)
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, "Failed to calculate SLO")
 		return
 	}
 
-	respondJSON(w, http.StatusOK, slo)
+	respondJSON(w, http.StatusOK, analysis)
 }
 
 func (s *Server) getSLOHistoryHandler(w http.ResponseWriter, r *http.Request) {

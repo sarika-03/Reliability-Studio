@@ -7,10 +7,11 @@ interface TimelineViewProps {
 
 interface TimelineEvent {
   id: string;
-  event_type: string;
+  // Backend returns "type" (Go struct field json:"type").
+  type: string;
   title: string;
   description: string;
-  severity: string;
+  severity?: string;
   created_at: string;
 }
 
@@ -20,15 +21,15 @@ export const TimelineView: React.FC<TimelineViewProps> = ({ incidentId = '' }: T
 
   useEffect(() => {
     if (!incidentId) return;
-    
+
     // Initial load
     loadTimeline();
-    
+
     // LIVE UPDATES: Poll for new timeline events every 5 seconds (control plane behavior)
     const interval = setInterval(() => {
       loadTimeline();
     }, 5000);
-    
+
     return () => clearInterval(interval);
   }, [incidentId]);
 
@@ -80,7 +81,7 @@ export const TimelineView: React.FC<TimelineViewProps> = ({ incidentId = '' }: T
         <div style={styles.timeline}>
           {events.map((event: TimelineEvent) => (
             <div key={event.id} style={styles.event}>
-              <div style={styles.eventIcon}>{getEventIcon(event.event_type)}</div>
+              <div style={styles.eventIcon}>{getEventIcon(event.type)}</div>
               <div style={styles.eventContent}>
                 <div style={styles.eventTitle}>{event.title}</div>
                 <div style={styles.eventDescription}>{event.description}</div>
@@ -91,10 +92,10 @@ export const TimelineView: React.FC<TimelineViewProps> = ({ incidentId = '' }: T
               <div
                 style={{
                   ...styles.eventSeverity,
-                  backgroundColor: getSeverityColor(event.severity),
+                  backgroundColor: getSeverityColor(event.severity || 'info'),
                 }}
               >
-                {event.severity}
+                {event.severity || 'info'}
               </div>
             </div>
           ))}

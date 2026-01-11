@@ -132,6 +132,22 @@ interface IncidentControlPlaneProps {
   onIncidentResolved: () => void;
 }
 
+interface IncidentAnalysis {
+  incident_id: string;
+  service: string;
+  namespace?: string;
+  incident_confidence: number;
+  root_cause_summary_text?: string;
+  root_cause_summary?: Array<{
+    signal_type: string;
+    source: string;
+    reason: string;
+    primary: boolean;
+    signal_ids?: string[];
+  }>;
+  correlations: any[];
+}
+
 export const IncidentControlPlane: React.FC<IncidentControlPlaneProps> = ({
   incident,
   timeline,
@@ -143,6 +159,35 @@ export const IncidentControlPlane: React.FC<IncidentControlPlaneProps> = ({
   const [noteText, setNoteText] = useState('');
   const [addingNote, setAddingNote] = useState(false);
   const [incidentDuration, setIncidentDuration] = useState('');
+  const [analysis, setAnalysis] = useState<IncidentAnalysis | null>(null);
+  const [analysisLoading, setAnalysisLoading] = useState<boolean>(true);
+
+  // Load incident analysis
+  useEffect(() => {
+    let cancelled = false;
+    const load = async () => {
+      try {
+        setAnalysisLoading(true);
+        const data = await incidentsApi.getAnalysis(incident.id);
+        if (!cancelled) {
+          setAnalysis(data);
+        }
+      } catch (err) {
+        console.error('Failed to load incident analysis', err);
+        if (!cancelled) {
+          setAnalysis(null);
+        }
+      } finally {
+        if (!cancelled) {
+          setAnalysisLoading(false);
+        }
+      }
+    };
+    load();
+    return () => {
+      cancelled = true;
+    };
+  }, [incident.id]);
 
   // Calculate incident duration
   useEffect(() => {
@@ -239,20 +284,53 @@ export const IncidentControlPlane: React.FC<IncidentControlPlaneProps> = ({
           </div>
         </div>
         <IncidentHeader incident={incident} onUpdate={() => onIncidentUpdate(incident)} />
+        {/* ANALYSIS SUMMARY */}
+        <div style={{ marginTop: '12px', display: 'flex', justifyContent: 'space-between', gap: 16 }}>
+          <div style={{ flex: 1 }}>
+            <div style={{ fontSize: 11, color: theme.textMuted, marginBottom: 4 }}>ANALYSIS</div>
+            {analysisLoading ? (
+              <div style={{ fontSize: 12, color: theme.textMuted }}>Running incident analysis…</div>
+            ) : analysis && analysis.root_cause_summary_text ? (
+              <div style={{ fontSize: 13, color: theme.text }}>{analysis.root_cause_summary_text}</div>
+            ) : (
+              <div style={{ fontSize: 13, color: theme.textMuted }}>No strong root cause identified yet.</div>
+            )}
+          </div>
+          <div style={{ minWidth: 160, textAlign: 'right' }}>
+            <div style={{ fontSize: 11, color: theme.textMuted, marginBottom: 4 }}>CONFIDENCE</div>
+            {analysisLoading ? (
+              <div style={{ fontSize: 13, color: theme.textMuted }}>—</div>
+            ) : analysis ? (
+              <div style={{ fontSize: 13, color: theme.text }}>
+                {(analysis.incident_confidence * 100).toFixed(0)}%
+              </div>
+            ) : (
+              <div style={{ fontSize: 13, color: theme.textMuted }}>N/A</div>
+            )}
+          </div>
+        </div>
       </div>
 
       {/* IMPACT & SERVICES: Automatically filtered to incident */}
       <div className={styles.impactSection}>
         <div className={styles.sectionTitle}>Impact & Affected Services</div>
         <BlastRadiusView services={affectedServices} />
-        {correlations.length > 0 && (
+        {analysis && analysis.correlations && analysis.correlations.length > 0 && (
           <div style={{ marginTop: '16px', padding: '12px', background: theme.bg, borderRadius: '4px' }}>
-            <div style={{ fontSize: '12px', fontWeight: 600, marginBottom: '8px', color: theme.text }}>Correlations Found</div>
-            {correlations.slice(0, 5).map((corr: any) => (
-              <div key={corr.id} style={{ fontSize: '11px', color: theme.textMuted, marginBottom: '4px' }}>
-                {corr.correlation_type}: {corr.source_id} ({(corr.confidence_score * 100).toFixed(0)}% confidence)
-              </div>
-            ))}
+            <div style={{ fontSize: '12px', fontWeight: 600, marginBottom: '8px', color: theme.text }}>Key Signals</div>
+            {analysis.root_cause_summary && analysis.root_cause_summary.length > 0 ? (
+              analysis.root_cause_summary.slice(0, 3).map((rc, idx) => (
+                <div key={idx} style={{ fontSize: '11px', color: theme.textMuted, marginBottom: '4px' }}>
+                  {rc.primary ? 'PRIMARY' : 'CONTRIBUTING'} • {rc.signal_type} from {rc.source}: {rc.reason}
+                </div>
+              ))
+            ) : (
+              analysis.correlations.slice(0, 5).map((corr: any) => (
+                <div key={corr.id} style={{ fontSize: '11px', color: theme.textMuted, marginBottom: '4px' }}>
+                  {corr.type}: {corr.source_id} ({(corr.confidence_score * 100).toFixed(0)}% confidence)
+                </div>
+              ))
+            )}
           </div>
         )}
       </div>

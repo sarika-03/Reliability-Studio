@@ -1,3 +1,4 @@
+/// <reference types="vite/client" />
 import { useState, useEffect, useCallback } from 'react';
 
 interface RealtimeMessage {
@@ -11,6 +12,7 @@ interface UseRealtimeOptions {
   onIncidentCreated?: (incident: any) => void;
   onIncidentUpdated?: (incident: any) => void;
   onCorrelationFound?: (data: any) => void;
+  onTimelineEvent?: (event: any) => void;
   onAlert?: (alert: any) => void;
 }
 
@@ -26,76 +28,91 @@ interface UseRealtimeOptions {
  * ```
  */
 export function useRealtime({
-  url = 'ws://localhost:9000/api/realtime',
+  url = import.meta.env.VITE_WS_URL || 'ws://localhost:9000/api/realtime',
   onIncidentCreated,
   onIncidentUpdated,
   onCorrelationFound,
+  onTimelineEvent,
   onAlert,
 }: UseRealtimeOptions = {}) {
   const [connected, setConnected] = useState(false);
   const [lastMessage, setLastMessage] = useState<RealtimeMessage | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [ws, setWs] = useState<WebSocket | null>(null);
+  const [retryCount, setRetryCount] = useState(0);
 
   useEffect(() => {
-    const websocket = new WebSocket(url);
+    let cleanup = false;
+    let socket: WebSocket;
 
-    websocket.onopen = () => {
-      console.log('[WebSocket] Connected to realtime server');
-      setConnected(true);
-      setError(null);
-    };
+    const connect = () => {
+      if (cleanup) return;
 
-    websocket.onmessage = (event) => {
-      try {
-        const message: RealtimeMessage = JSON.parse(event.data);
-        setLastMessage(message);
+      console.log(`[WebSocket] Connecting to ${url}...`);
+      socket = new WebSocket(url);
 
-        // Route message to appropriate handler
-        switch (message.type) {
-          case 'incident_created':
-            onIncidentCreated?.(message.payload);
-            break;
-          case 'incident_updated':
-            onIncidentUpdated?.(message.payload);
-            break;
-          case 'correlation_found':
-            onCorrelationFound?.(message.payload);
-            break;
-          case 'alert':
-            onAlert?.(message.payload);
-            break;
-          default:
-            console.log('[WebSocket] Unknown message type:', message.type);
+      socket.onopen = () => {
+        if (cleanup) return;
+        console.log('[WebSocket] Connected to realtime server');
+        setConnected(true);
+        setError(null);
+        setRetryCount(0);
+      };
+
+      socket.onmessage = (event) => {
+        if (cleanup) return;
+        try {
+          const message: RealtimeMessage = JSON.parse(event.data);
+          setLastMessage(message);
+
+          switch (message.type) {
+            case 'incident_created': onIncidentCreated?.(message.payload); break;
+            case 'incident_updated': onIncidentUpdated?.(message.payload); break;
+            case 'correlation_found': onCorrelationFound?.(message.payload); break;
+            case 'timeline_event': onTimelineEvent?.(message.payload); break;
+            case 'alert': onAlert?.(message.payload); break;
+            default: console.log('[WebSocket] Unknown message type:', message.type);
+          }
+        } catch (e) {
+          console.error('[WebSocket] Failed to parse message:', e);
         }
-      } catch (e) {
-        console.error('[WebSocket] Failed to parse message:', e);
-      }
+      };
+
+      socket.onerror = (event) => {
+        if (cleanup) return;
+        console.error('[WebSocket] Error:', event);
+        setError('WebSocket connection error');
+        setConnected(false);
+      };
+
+      socket.onclose = (event) => {
+        if (cleanup) return;
+        console.log('[WebSocket] Connection closed:', event.code, event.reason);
+        setConnected(false);
+
+        // Exponential backoff for reconnection
+        const delay = Math.min(1000 * Math.pow(2, retryCount), 30000);
+        console.log(`[WebSocket] Attempting reconnection in ${delay}ms...`);
+        setTimeout(() => {
+          if (!cleanup) {
+            setRetryCount(prev => prev + 1);
+            connect();
+          }
+        }, delay);
+      };
+
+      setWs(socket);
     };
 
-    websocket.onerror = (event) => {
-      console.error('[WebSocket] Error:', event);
-      setError('WebSocket connection error');
-      setConnected(false);
-    };
-
-    websocket.onclose = () => {
-      console.log('[WebSocket] Connection closed');
-      setConnected(false);
-      // Attempt reconnection after 5 seconds
-      setTimeout(() => {
-        console.log('[WebSocket] Attempting reconnection...');
-      }, 5000);
-    };
-
-    setWs(websocket);
+    connect();
 
     return () => {
-      if (websocket.readyState === WebSocket.OPEN) {
-        websocket.close();
+      cleanup = true;
+      if (socket && socket.readyState === WebSocket.OPEN) {
+        socket.close();
       }
     };
-  }, [url]);
+  }, [url, retryCount]);
 
   const send = useCallback((message: any) => {
     if (ws?.readyState === WebSocket.OPEN) {

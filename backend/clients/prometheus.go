@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 )
@@ -267,29 +268,27 @@ func (c *PrometheusClient) PushHistogram(ctx context.Context, metricName string,
 	return c.pushMetric(ctx, metricName, value, labels)
 }
 
-// pushMetric is the internal method that pushes metrics directly to Prometheus
-// This pushes metrics in the Prometheus text format directly to Prometheus scrape endpoint
+// pushMetric is the internal method that pushes metrics using the Prometheus
+// Pushgateway. This makes the /api/test/* endpoints deterministic: every call
+// produces concrete time-series that Prometheus scrapes.
 func (c *PrometheusClient) pushMetric(ctx context.Context, metricName string, value float64, labels map[string]string) error {
 	// Build metric in Prometheus text format
 	// Format: metric_name{label1="value1",label2="value2"} value timestamp
 	metricLine := buildMetricLine(metricName, value, labels)
 
-	// We push to Prometheus directly via the remote write protocol or local file
-	// For simplicity, we'll use curl-like approach with HTTP POST to Prometheus pushgateway if available
-	// Otherwise, metrics will be scraped on next interval
-
-	// Try to push to pushgateway if available (optional)
-	pushgatewayURL := strings.Replace(c.BaseURL, ":9090", ":9091", 1)
-
-	// Build job label string
-	jobLabels := "job=test_endpoint"
-	for k, v := range labels {
-		if k != "" && v != "" {
-			jobLabels += fmt.Sprintf("/%s/%s", k, v)
-		}
+	// Resolve Pushgateway base URL
+	pushgatewayURL := os.Getenv("PUSHGATEWAY_URL")
+	if pushgatewayURL == "" {
+		// Fallback: assume pushgateway is running next to Prometheus on port 9091
+		pushgatewayURL = strings.Replace(c.BaseURL, ":9090", ":9091", 1)
+	}
+	if !strings.HasPrefix(pushgatewayURL, "http://") && !strings.HasPrefix(pushgatewayURL, "https://") {
+		pushgatewayURL = "http://" + pushgatewayURL
 	}
 
-	pushURL := fmt.Sprintf("%s/metrics/job/%s", pushgatewayURL, jobLabels)
+	// Use a stable job name; labels in the metric line carry service/status/etc.
+	jobName := "reliability-backend"
+	pushURL := fmt.Sprintf("%s/metrics/job/%s", strings.TrimRight(pushgatewayURL, "/"), jobName)
 
 	// Prepare the request body with the metric line
 	body := []byte(metricLine)
@@ -303,13 +302,13 @@ func (c *PrometheusClient) pushMetric(ctx context.Context, metricName string, va
 
 	resp, err := c.HTTPClient.Do(req)
 	if err != nil {
-		// Pushgateway may not be available, which is OK - metrics will be scraped later
+		// Pushgateway may not be available; do not fail the main code path.
 		return nil
 	}
 	defer resp.Body.Close()
 
+	// Ignore non-success codes; this is best-effort for demo environments.
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
-		// Log but don't fail - pushgateway might not be available
 		return nil
 	}
 

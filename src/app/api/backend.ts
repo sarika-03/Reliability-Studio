@@ -17,7 +17,7 @@ interface ApiError {
 class ApiErrorHandler {
   static async handle(response: Response): Promise<ApiError> {
     const errorData = await response.json().catch(() => ({ error: 'Unknown error' }));
-    
+
     // Check for 401 Unauthorized (token expired or invalid)
     if (response.status === 401) {
       return {
@@ -62,10 +62,10 @@ export function setTokenExpiredCallback(callback: () => void) {
 
 async function apiFetch<T>(endpoint: string, options: FetchOptions = {}): Promise<T> {
   const { body, serviceName = 'backend-api', ...customConfig } = options;
-  
+
   // Get token from localStorage
   const token = localStorage.getItem('access_token');
-  
+
   const headers = {
     'Content-Type': 'application/json',
     ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
@@ -85,10 +85,10 @@ async function apiFetch<T>(endpoint: string, options: FetchOptions = {}): Promis
   return retry(
     async () => {
       const response = await fetch(`${API_BASE}${endpoint}`, config);
-      
+
       if (!response.ok) {
         const apiError = await ApiErrorHandler.handle(response);
-        
+
         // Handle token expiration globally
         if (apiError.isTokenExpired) {
           localStorage.removeItem('access_token');
@@ -97,37 +97,43 @@ async function apiFetch<T>(endpoint: string, options: FetchOptions = {}): Promis
             onTokenExpired();
           }
         }
-        
+
         const error = new Error(apiError.message) as Error & { status?: number; isTokenExpired?: boolean };
         error.status = apiError.status;
         error.isTokenExpired = apiError.isTokenExpired;
-        
+
         // Don't retry non-retryable errors
         if (!isRetryableError(error) && apiError.status !== 503) {
           throw error;
         }
-        
+
         throw error;
       }
-      
+
       return await response.json();
     },
     serviceName,
     { maxAttempts: 3, initialDelay: 1000, maxDelay: 8000 }
   ).then(result => {
-    if (result.success && result.data) {
+    if (result.success) {
+      // Return data even if it's falsy (like empty array, 0, or false)
+      // as long as the request was successful
       return result.data as T;
     }
-    throw result.error || new Error('Failed to fetch data');
+
+    // If not successful, throw the actual error from retry logic
+    const fetchError = result.error || new Error('Failed to fetch data');
+    console.error(`[API] Request failed for ${endpoint}:`, fetchError);
+    throw fetchError;
   });
 }
 
 export const backendAPI = {
   auth: {
-    login: (username: string, password: string) => 
-      apiFetch<{ access_token: string; user: any }>("/auth/login", { 
-        method: 'POST', 
-        body: { username, password } 
+    login: (username: string, password: string) =>
+      apiFetch<{ access_token: string; user: any }>("/auth/login", {
+        method: 'POST',
+        body: { username, password }
       }),
     register: (username: string, email: string, password: string) =>
       apiFetch<{ user_id: string; username: string }>("/auth/register", {
@@ -144,6 +150,7 @@ export const backendAPI = {
     update: (id: string, data: any) => apiFetch<any>(`/incidents/${id}`, { method: 'PATCH', body: data }),
     getTimeline: (id: string) => apiFetch<any[]>(`/incidents/${id}/timeline`),
     getCorrelations: (id: string) => apiFetch<any[]>(`/incidents/${id}/correlations`),
+    getAnalysis: (id: string) => apiFetch<any>(`/incidents/${id}/analysis`),
   },
   services: {
     list: () => apiFetch<any[]>("/services"),

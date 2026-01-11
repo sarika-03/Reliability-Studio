@@ -59,6 +59,7 @@ type IncidentDetector struct {
 	stopChan            chan struct{}
 	running             bool
 	correlationCallback CorrelationCallback // Callback to trigger correlation
+	timelineCallback    func(event interface{}) // Callback for timeline events
 }
 
 // NewIncidentDetector creates a new incident detector
@@ -82,6 +83,11 @@ func NewIncidentDetector(
 // SetCorrelationCallback sets the callback to trigger correlation when incidents are created
 func (d *IncidentDetector) SetCorrelationCallback(callback CorrelationCallback) {
 	d.correlationCallback = callback
+}
+
+// SetTimelineCallback sets the callback for timeline events
+func (d *IncidentDetector) SetTimelineCallback(callback func(event interface{})) {
+	d.timelineCallback = callback
 }
 
 // Start begins continuous incident detection
@@ -179,13 +185,11 @@ func (d *IncidentDetector) evaluateRule(ctx context.Context, rule DetectionRule)
 
 	switch rule.RuleType {
 	case "threshold":
-		evt, err := d.evaluateThresholdRule(ctx, rule)
+		thresholdEvents, err := d.evaluateThresholdRule(ctx, rule)
 		if err != nil {
 			return nil, err
 		}
-		if evt != nil {
-			events = append(events, *evt)
-		}
+		events = append(events, thresholdEvents...)
 
 	case "anomaly":
 		evts, err := d.evaluateAnomalyRule(ctx, rule)
@@ -208,74 +212,11 @@ func (d *IncidentDetector) evaluateRule(ctx context.Context, rule DetectionRule)
 }
 
 // evaluateThresholdRule checks if metrics exceed configured thresholds
-func (d *IncidentDetector) evaluateThresholdRule(ctx context.Context, rule DetectionRule) (*DetectionEvent, error) {
-	// For High Error Rate rule, we need to check each service individually
-	// because the Prometheus query returns per-service results
-	if rule.Name == "High Error Rate" {
-		// Query for error rate per service
-		query := `rate(http_requests_total{service=~".+",status=~"5.."}[5m]) / rate(http_requests_total{service=~".+"}[5m])`
-		resp, err := d.promClient.Query(ctx, query, time.Time{})
-		if err != nil {
-			d.logger.Printf("Failed to query Prometheus for error rate: %v\n", err)
-			return nil, nil // Non-fatal
-		}
-
-		if len(resp.Data.Result) == 0 {
-			return nil, nil // No errors detected
-		}
-
-		// Check each service's error rate
-		for _, result := range resp.Data.Result {
-			if len(result.Value) < 2 {
-				continue
-			}
-
-			valueStr, ok := result.Value[1].(string)
-			if !ok {
-				continue
-			}
-
-			var errorRate float64
-			if _, err := fmt.Sscanf(valueStr, "%f", &errorRate); err != nil {
-				continue
-			}
-
-			// Check if error rate exceeds threshold (threshold is already a ratio, not percentage)
-			if errorRate > rule.ThresholdValue {
-				serviceName := "unknown-service"
-				if svc, ok := result.Metric["service"]; ok {
-					serviceName = svc
-				}
-
-				d.logger.Printf("🚨 DETECTION TRIGGERED: Rule=%s, Service=%s, ErrorRate=%.4f (%.2f%%), Threshold=%.4f (%.2f%%)\n",
-					rule.Name, serviceName, errorRate, errorRate*100, rule.ThresholdValue, rule.ThresholdValue*100)
-
-				return &DetectionEvent{
-					RuleID:    rule.ID,
-					RuleName:  rule.Name,
-					ServiceID: serviceName,
-					Severity:  rule.Severity,
-					Value:     errorRate,
-					Timestamp: time.Now(),
-					Metadata: map[string]interface{}{
-						"threshold":      rule.ThresholdValue,
-						"actual":         errorRate,
-						"exceeded_by":    errorRate - rule.ThresholdValue,
-						"prometheus_tags": result.Metric,
-					},
-					Evidence: []string{
-						fmt.Sprintf("Error rate %.2f%% exceeded threshold %.2f%%", errorRate*100, rule.ThresholdValue*100),
-						fmt.Sprintf("Service: %s", serviceName),
-						fmt.Sprintf("Prometheus query: %s", query),
-					},
-				}, nil
-			}
-		}
-		return nil, nil
-	}
-
-	// For other rules, use the rule's query directly
-	resp, err := d.promClient.Query(ctx, rule.Query, time.Time{})
+func (d *IncidentDetector) evaluateThresholdRule(ctx context.Context, rule DetectionRule) ([]DetectionEvent, error) {
+	events := make([]DetectionEvent, 0)
+	
+	// Query Prometheus for rule's query
+	resp, err := d.promClient.Query(ctx, rule.Query, time.Now())
 	if err != nil {
 		d.logger.Printf("Failed to query Prometheus for rule %s: %v\n", rule.Name, err)
 		return nil, nil // Non-fatal
@@ -285,7 +226,7 @@ func (d *IncidentDetector) evaluateThresholdRule(ctx context.Context, rule Detec
 		return nil, nil // Condition not triggered
 	}
 
-	// Check each result
+	// Check each result (one per service/label combination)
 	for _, result := range resp.Data.Result {
 		if len(result.Value) < 2 {
 			continue
@@ -303,6 +244,8 @@ func (d *IncidentDetector) evaluateThresholdRule(ctx context.Context, rule Detec
 		}
 
 		// Check if threshold is exceeded
+		// NOTE: For "High Error Rate" rule the value is a ratio in [0,1]. For
+		// other rules it may be a raw metric; we simply compare numerically.
 		if value > rule.ThresholdValue {
 			serviceName := "unknown-service"
 			if svc, ok := result.Metric["service"]; ok {
@@ -312,7 +255,7 @@ func (d *IncidentDetector) evaluateThresholdRule(ctx context.Context, rule Detec
 			d.logger.Printf("🚨 DETECTION TRIGGERED: Rule=%s, Service=%s, Value=%.4f, Threshold=%.4f\n",
 				rule.Name, serviceName, value, rule.ThresholdValue)
 
-			return &DetectionEvent{
+			events = append(events, DetectionEvent{
 				RuleID:    rule.ID,
 				RuleName:  rule.Name,
 				ServiceID: serviceName,
@@ -330,11 +273,11 @@ func (d *IncidentDetector) evaluateThresholdRule(ctx context.Context, rule Detec
 					fmt.Sprintf("Service: %s", serviceName),
 					fmt.Sprintf("Query: %s", rule.Query),
 				},
-			}, nil
+			})
 		}
 	}
 
-	return nil, nil
+	return events, nil
 }
 
 // evaluateAnomalyRule detects statistical anomalies in metrics
@@ -481,6 +424,17 @@ func (d *IncidentDetector) processDetectionEvent(ctx context.Context, event Dete
 	)
 	if err != nil {
 		d.logger.Printf("Warning: Failed to add timeline event: %v\n", err)
+	} else if d.timelineCallback != nil {
+		d.timelineCallback(map[string]interface{}{
+			"id":          timelineID,
+			"incident_id": incidentID,
+			"event_type":  "metric_anomaly",
+			"timestamp":   event.Timestamp,
+			"source":      "prometheus",
+			"title":       fmt.Sprintf("Detected: %s", event.RuleName),
+			"description": fmt.Sprintf("Automated detection triggered: %s (value: %.2f)", event.RuleName, event.Value),
+			"metadata":    event.Metadata,
+		})
 	}
 
 	// Track this active alert

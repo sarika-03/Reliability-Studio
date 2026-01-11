@@ -122,6 +122,17 @@ func InitSchema(db *sql.DB) error {
 		UNIQUE(service_id, name)
 	);
 
+	-- SLO History table
+	CREATE TABLE IF NOT EXISTS slo_history (
+		id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+		slo_id UUID REFERENCES slos(id) ON DELETE CASCADE,
+		timestamp TIMESTAMP WITH TIME ZONE NOT NULL,
+		value DECIMAL(5,2) NOT NULL,
+		error_budget DECIMAL(5,2) NOT NULL,
+		burn_rate DECIMAL(5,2) NOT NULL,
+		created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+	);
+
 	-- Incidents table
 	CREATE TABLE IF NOT EXISTS incidents (
 		id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
@@ -148,11 +159,110 @@ func InitSchema(db *sql.DB) error {
 		updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 	);
 
+	-- Incident Services table
+	CREATE TABLE IF NOT EXISTS incident_services (
+		incident_id UUID REFERENCES incidents(id) ON DELETE CASCADE,
+		service_id UUID REFERENCES services(id) ON DELETE CASCADE,
+		impact_level VARCHAR(50),
+		detected_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+		PRIMARY KEY (incident_id, service_id)
+	);
+
+	-- Incident Tasks table
+	CREATE TABLE IF NOT EXISTS incident_tasks (
+		id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+		incident_id UUID REFERENCES incidents(id) ON DELETE CASCADE,
+		title VARCHAR(500) NOT NULL,
+		description TEXT,
+		status VARCHAR(50) DEFAULT 'open',
+		assigned_to UUID REFERENCES users(id),
+		created_by UUID REFERENCES users(id),
+		due_at TIMESTAMP WITH TIME ZONE,
+		created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+		completed_at TIMESTAMP WITH TIME ZONE
+	);
+
+	-- Correlation Rules table
+	CREATE TABLE IF NOT EXISTS correlation_rules (
+		id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+		name VARCHAR(255) UNIQUE NOT NULL,
+		description TEXT,
+		enabled BOOLEAN DEFAULT true,
+		rule_type VARCHAR(50) NOT NULL,
+		query TEXT NOT NULL,
+		threshold_value DECIMAL(10,4),
+		severity VARCHAR(50) NOT NULL,
+		service_id UUID REFERENCES services(id),
+		metadata JSONB DEFAULT '{}'::jsonb,
+		created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+		updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+	);
+
+	-- Alerts table
+	CREATE TABLE IF NOT EXISTS alerts (
+		id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+		alert_name VARCHAR(255) NOT NULL,
+		fingerprint VARCHAR(255) UNIQUE,
+		status VARCHAR(50) NOT NULL,
+		severity VARCHAR(50) NOT NULL,
+		labels JSONB NOT NULL,
+		annotations JSONB,
+		starts_at TIMESTAMP WITH TIME ZONE NOT NULL,
+		ends_at TIMESTAMP WITH TIME ZONE,
+		incident_id UUID REFERENCES incidents(id) ON DELETE SET NULL,
+		created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+		updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+	);
+
+	-- Metrics Cache table
+	CREATE TABLE IF NOT EXISTS metrics_cache (
+		id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+		metric_key VARCHAR(255) NOT NULL,
+		service_id UUID REFERENCES services(id) ON DELETE CASCADE,
+		timestamp TIMESTAMP WITH TIME ZONE NOT NULL,
+		value DECIMAL(20,6) NOT NULL,
+		labels JSONB DEFAULT '{}'::jsonb,
+		created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+		UNIQUE(metric_key, service_id, timestamp)
+	);
+
+	-- Investigation Hypotheses table
+	CREATE TABLE IF NOT EXISTS investigation_hypotheses (
+		id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+		incident_id UUID REFERENCES incidents(id) ON DELETE CASCADE,
+		title VARCHAR(500) NOT NULL,
+		description TEXT,
+		status VARCHAR(50) DEFAULT 'proposed',
+		confidence DECIMAL(3,2) DEFAULT 0.5,
+		created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+		updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+	);
+
+	-- Investigation Steps table
+	CREATE TABLE IF NOT EXISTS investigation_steps (
+		id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+		incident_id UUID REFERENCES incidents(id) ON DELETE CASCADE,
+		hypothesis_id UUID REFERENCES investigation_hypotheses(id) ON DELETE SET NULL,
+		title VARCHAR(500) NOT NULL,
+		description TEXT,
+		action VARCHAR(100) NOT NULL,
+		status VARCHAR(50) DEFAULT 'pending',
+		findings JSONB DEFAULT '{}'::jsonb,
+		assigned_to UUID REFERENCES users(id),
+		created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+		completed_at TIMESTAMP WITH TIME ZONE
+	);
+
 	-- Timeline events table
+	-- NOTE: "timestamp" column is required by the incident timeline APIs.
+	-- Older databases created before this change may be missing it, so we also
+	-- run an ALTER TABLE further down to backfill the column.
 	CREATE TABLE IF NOT EXISTS timeline_events (
 		id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
 		incident_id UUID REFERENCES incidents(id) ON DELETE CASCADE,
 		event_type VARCHAR(50) NOT NULL,
+		-- When the event actually happened (separate from created_at)
+		timestamp TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
 		source VARCHAR(50) NOT NULL,
 		title VARCHAR(500) NOT NULL,
 		description TEXT,
@@ -206,6 +316,10 @@ func InitSchema(db *sql.DB) error {
 	CREATE INDEX IF NOT EXISTS idx_incidents_started_at ON incidents(started_at DESC);
 	CREATE INDEX IF NOT EXISTS idx_timeline_incident_id ON timeline_events(incident_id);
 	CREATE INDEX IF NOT EXISTS idx_timeline_created_at ON timeline_events(created_at DESC);
+	-- Ensure the timestamp column exists for older databases that were created
+	-- before it was added to the CREATE TABLE statement above.
+	ALTER TABLE timeline_events
+		ADD COLUMN IF NOT EXISTS timestamp TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP;
 	CREATE INDEX IF NOT EXISTS idx_correlations_incident_id ON correlations(incident_id);
 	CREATE INDEX IF NOT EXISTS idx_slos_service_id ON slos(service_id);
 	CREATE INDEX IF NOT EXISTS idx_metrics_incident_id ON metrics_snapshots(incident_id);
@@ -258,7 +372,7 @@ func SeedDefaultData(db *sql.DB) error {
 	}
 
 	// Insert default admin user - FIXED: Use parameterized query and real bcrypt hash
-	hashedPassword, err := bcrypt.GenerateFromPassword([]byte("admin-password"), bcrypt.DefaultCost)
+	hashedPassword, err := bcrypt.GenerateFromPassword([]byte("admin"), bcrypt.DefaultCost)
 	if err != nil {
 		return fmt.Errorf("failed to hash admin password: %w", err)
 	}
@@ -266,28 +380,35 @@ func SeedDefaultData(db *sql.DB) error {
 	_, err = db.Exec(`
 		INSERT INTO users (email, username, password_hash, roles)
 		VALUES ($1, $2, $3, $4::jsonb)
-		ON CONFLICT (email) DO NOTHING
+		ON CONFLICT (email) DO UPDATE SET password_hash = EXCLUDED.password_hash
 	`, "admin@reliability.io", "admin", string(hashedPassword), `["admin", "editor", "viewer"]`)
 
 	if err != nil {
 		return fmt.Errorf("failed to seed admin user: %w", err)
 	}
 
-	// Insert default SLOs for the services
-	for _, svcName := range []string{"frontend-web", "api-gateway"} {
+	// Insert default SLOs for the core demo services.
+	// NOTE: These are wired to the exact metric shape produced by the test endpoints
+	// and telemetry middleware: http_requests_total{service="<svc>",status="200"|"500"}.
+	for _, svcName := range []string{"frontend-web", "api-gateway", "payment-service"} {
 		var serviceID string
 		err := db.QueryRow("SELECT id FROM services WHERE name = $1", svcName).Scan(&serviceID)
 		if err == nil {
+			availabilityQuery := fmt.Sprintf(
+				"(1 - (rate(http_requests_total{service=\"%s\",status=~\"5..\"}[${WINDOW}]) / rate(http_requests_total{service=\"%s\"}[${WINDOW}]))) * 100",
+				svcName, svcName,
+			)
 			_, _ = db.Exec(`
 				INSERT INTO slos (service_id, name, description, target_percentage, window_days, sli_type, query)
 				VALUES ($1, $2, $3, $4, $5, $6, $7)
 				ON CONFLICT (service_id, name) DO NOTHING
-			`, serviceID, "Availability", "Percentage of successful requests", 99.9, 30, "availability",
-				fmt.Sprintf(`sum(rate(http_requests_total{service="%s",status!~"5.."}[${WINDOW}])) / sum(rate(http_requests_total{service="%s"}[${WINDOW}])) * 100`, svcName, svcName))
+			`, serviceID, "Availability", "Percentage of successful requests", 99.9, 30, "availability", availabilityQuery)
 		}
 	}
 
 	// Insert detection rules for automatic incident detection
+	// These are tuned so the /api/test/fail endpoint (30% error rate over 60s)
+	// will deterministically fire "High Error Rate" for the target service.
 	detectionRules := []struct {
 		name           string
 		description    string
@@ -298,10 +419,11 @@ func SeedDefaultData(db *sql.DB) error {
 	}{
 		{
 			name:           "High Error Rate",
-			description:    "Detects error rate > 5% for any service",
+			description:    "Detects error rate > 20% for any service (tuned for demo)",
 			ruleType:       "threshold",
+			// Uses the same metric shape as SLOs and /api/test/fail. Value is a ratio [0,1].
 			query:          `rate(http_requests_total{service=~".+",status=~"5.."}[5m]) / rate(http_requests_total{service=~".+"}[5m])`,
-			thresholdValue: 0.05,
+			thresholdValue: 0.20,
 			severity:       "critical",
 		},
 		{

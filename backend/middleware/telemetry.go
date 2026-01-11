@@ -1,9 +1,11 @@
 package middleware
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -179,6 +181,7 @@ func (tm *TelemetryMiddleware) shouldSkipTelemetry(path string) bool {
 		"/metrics",
 		"/ready",
 		"/-/",  // Prometheus internal endpoints
+		"/api/realtime",
 	}
 
 	for _, skip := range skipPaths {
@@ -222,4 +225,12 @@ func (rw *responseWriterWrapper) Write(data []byte) (int, error) {
 		rw.written = true
 	}
 	return rw.ResponseWriter.Write(data)
+}
+
+// Hijack implements the http.Hijacker interface
+func (rw *responseWriterWrapper) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	if hj, ok := rw.ResponseWriter.(http.Hijacker); ok {
+		return hj.Hijack()
+	}
+	return nil, nil, fmt.Errorf("http.ResponseWriter does not support hijacking")
 }

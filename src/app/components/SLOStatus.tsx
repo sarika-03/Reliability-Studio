@@ -1,64 +1,117 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import { Service } from '../../models/Service';
+import { backendAPI } from '../api/backend';
 
 interface SLOStatusProps {
   services?: Service[];
 }
 
-interface ServiceWithSLO extends Service {
-  slos?: Array<{
+interface SLOAnalysis {
+  slo: {
     id: string;
     name: string;
-    target: number;
-    current: number;
-    errorBudgetRemaining: number;
+    target_percentage: number;
+    current_percentage: number;
+    error_budget_remaining: number;
+    status: string;
+  };
+  burn_rates: Array<{
+    window: string;
+    burn_rate: number;
+    threshold: number;
+    breached: boolean;
   }>;
 }
 
 export const SLOStatus: React.FC<SLOStatusProps> = ({ services = [] }) => {
+  const [sloAnalyses, setSloAnalyses] = useState<Record<string, SLOAnalysis | null>>({});
+  const [loading, setLoading] = useState<boolean>(false);
+
+  useEffect(() => {
+    const load = async () => {
+      if (!services || services.length === 0) return;
+      setLoading(true);
+      const results: Record<string, SLOAnalysis | null> = {};
+      try {
+        // For now, fetch SLOs for the first service only (primary impact)
+        const primary = services[0];
+        const slos = await backendAPI.slos.list();
+        const byService = slos.filter((s: any) => s.service_id === primary.id);
+        for (const slo of byService) {
+          try {
+            const analysis = await backendAPI.slos.calculate(slo.id);
+            results[slo.id] = analysis as SLOAnalysis;
+          } catch (e) {
+            console.error('Failed to calculate SLO', e);
+            results[slo.id] = null;
+          }
+        }
+      } finally {
+        setSloAnalyses(results);
+        setLoading(false);
+      }
+    };
+    load();
+  }, [services]);
   const getSLOStatusColor = (remaining: number) => {
     if (remaining < 25) return '#d32f2f';
     if (remaining < 50) return '#f57c00';
     return '#388e3c';
   };
 
+  const primaryService = services[0];
+
   return (
     <div style={styles.container}>
       <h3 style={styles.heading}>SLO Status</h3>
-      {services.length === 0 ? (
+      {loading ? (
+        <p style={styles.empty}>Calculating SLOs…</p>
+      ) : !primaryService ? (
         <p style={styles.empty}>No SLO data available</p>
       ) : (
         <div style={styles.list}>
-          {(services as ServiceWithSLO[]).map((service) => (
-            <div key={service.id} style={styles.serviceSection}>
-              <div style={styles.serviceName}>{service.name}</div>
-              {service.slos && service.slos.length > 0 ? (
-                service.slos.map((slo) => (
-                  <div key={slo.id} style={styles.sloCard}>
+          <div style={styles.serviceSection}>
+            <div style={styles.serviceName}>{primaryService.name}</div>
+            {Object.keys(sloAnalyses).length === 0 ? (
+              <p style={styles.noSLO}>No SLOs configured</p>
+            ) : (
+              Object.entries(sloAnalyses).map(([id, analysis]) => {
+                if (!analysis) return null;
+                const slo = analysis.slo;
+                return (
+                  <div key={id} style={styles.sloCard}>
                     <div style={styles.sloName}>{slo.name}</div>
                     <div style={styles.sloMeta}>
-                      <span>Target: {slo.target}%</span>
-                      <span>Current: {slo.current?.toFixed(2)}%</span>
+                      <span>Target: {slo.target_percentage}%</span>
+                      <span>Current: {slo.current_percentage.toFixed(2)}%</span>
                     </div>
                     <div style={styles.progressBar}>
                       <div
                         style={{
                           ...styles.progressFill,
-                          width: `${Math.min(slo.errorBudgetRemaining, 100)}%`,
-                          backgroundColor: getSLOStatusColor(slo.errorBudgetRemaining),
+                          width: `${Math.min(Math.max(slo.error_budget_remaining, 0), 100)}%`,
+                          backgroundColor: getSLOStatusColor(slo.error_budget_remaining),
                         }}
                       />
                     </div>
                     <div style={styles.budgetText}>
-                      Error Budget: {slo.errorBudgetRemaining?.toFixed(1)}%
+                      Error Budget: {slo.error_budget_remaining.toFixed(1)}%
                     </div>
+                    {analysis.burn_rates && analysis.burn_rates.length > 0 && (
+                      <div style={{ marginTop: 6, fontSize: 11, color: '#666' }}>
+                        Burn rates:{' '}
+                        {analysis.burn_rates.map((br) => (
+                          <span key={br.window} style={{ marginRight: 8 }}>
+                            {br.window}: {br.burn_rate.toFixed(2)}x{br.breached ? ' (breached)' : ''}
+                          </span>
+                        ))}
+                      </div>
+                    )}
                   </div>
-                ))
-              ) : (
-                <p style={styles.noSLO}>No SLOs configured</p>
-              )}
-            </div>
-          ))}
+                );
+              })
+            )}
+          </div>
         </div>
       )}
     </div>

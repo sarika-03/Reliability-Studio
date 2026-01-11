@@ -1,10 +1,10 @@
 import React from 'react';
+import { IncidentControlRoom } from './IncidentControlRoom';
 
 export const AppRootPage = () => {
     return (
-        <div style={{ padding: '20px' }}>
-            <h1>Reliability Studio</h1>
-            <p>App is working! 🎉</p>
+        <div style={{ height: '100%', width: '100%' }}>
+            <IncidentControlRoom />
         </div>
     );
 };

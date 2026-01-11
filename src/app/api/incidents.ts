@@ -7,4 +7,5 @@ export const incidentsApi = {
   update: (id: string, data: any) => backendAPI.incidents.update(id, data),
   getTimeline: (id: string) => backendAPI.incidents.getTimeline(id),
   getCorrelations: (id: string) => backendAPI.incidents.getCorrelations(id),
+  getAnalysis: (id: string) => backendAPI.incidents.getAnalysis(id),
 };

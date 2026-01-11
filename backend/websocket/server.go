@@ -118,6 +118,15 @@ func (s *RealtimeServer) BroadcastCorrelationFound(data interface{}) {
 	}
 }
 
+// BroadcastTimelineEvent broadcasts a new timeline event to all clients
+func (s *RealtimeServer) BroadcastTimelineEvent(event interface{}) {
+	s.broadcast <- &Message{
+		Type:      "timeline_event",
+		Payload:   event,
+		Timestamp: getCurrentTimestamp(),
+	}
+}
+
 // BroadcastAlert broadcasts an alert to all clients
 func (s *RealtimeServer) BroadcastAlert(alert interface{}) {
 	s.broadcast <- &Message{

@@ -77,6 +77,14 @@ services:
       start_period: 20s
 
 
+  pushgateway:
+    image: prom/pushgateway:v1.8.0
+    container_name: pushgateway
+    ports:
+      - "19092:9091"
+    restart: unless-stopped
+
+
   postgres:
     image: postgres:15-alpine
     container_name: reliability-postgres
@@ -110,7 +118,9 @@ services:
       PROMETHEUS_URL: http://prometheus:9090
       LOKI_URL: http://loki:3100
       TEMPO_URL: http://tempo:3200
+      PUSHGATEWAY_URL: http://pushgateway:9091
       JWT_SECRET: dev-secret-change-this
+      AUTH_ENABLED: "false"
       CORS_ALLOWED_ORIGINS: http://localhost:3000,http://localhost:5173,http://127.0.0.1:3000,http://127.0.0.1:5173
     depends_on:
       postgres:

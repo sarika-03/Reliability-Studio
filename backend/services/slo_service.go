@@ -52,8 +52,14 @@ func NewSLOService(db *sql.DB, promClient PrometheusQueryClient) *SLOService {
 	}
 }
 
+// SLOAnalysisResult captures SLO plus multi-window burn information.
+type SLOAnalysisResult struct {
+	SLO       *SLO          `json:"slo"`
+	BurnRates []SLOBurnRate `json:"burn_rates"`
+}
+
 // CalculateSLO calculates current SLO compliance
-func (s *SLOService) CalculateSLO(ctx context.Context, sloID string) (*SLO, error) {
+func (s *SLOService) CalculateSLO(ctx context.Context, sloID string) (*SLOAnalysisResult, error) {
 	// Get SLO configuration
 	slo, err := s.GetSLO(ctx, sloID)
 	if err != nil {
@@ -130,7 +136,10 @@ func (s *SLOService) CalculateSLO(ctx context.Context, sloID string) (*SLO, erro
 	slo.Status = status
 	slo.LastCalculatedAt = time.Now()
 
-	return slo, nil
+	// Enrich with multi-window burn rate analysis (best effort)
+	burn, _ := s.CalculateBurnRate(ctx, sloID)
+
+	return &SLOAnalysisResult{SLO: slo, BurnRates: burn}, nil
 }
 
 // CalculateAllSLOs calculates all SLOs for all services
@@ -174,7 +183,10 @@ func (s *SLOService) GetSLOHistory(ctx context.Context, sloID string) ([]map[str
 	start := end.Add(-24 * time.Hour)
 	step := 15 * time.Minute
 
-	result, err := s.promClient.QueryRange(ctx, slo.Query, start, end, step)
+	window := fmt.Sprintf("%dd", slo.WindowDays)
+	query := strings.ReplaceAll(slo.Query, "${WINDOW}", window)
+
+	result, err := s.promClient.QueryRange(ctx, query, start, end, step)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query history: %w", err)
 	}
@@ -207,8 +219,8 @@ func (s *SLOService) GetSLO(ctx context.Context, sloID string) (*SLO, error) {
 	query := `
 		SELECT s.id, s.service_id, sv.name as service_name, s.name, s.description,
 		       s.target_percentage, s.window_days, s.sli_type, s.query,
-		       s.current_percentage, s.error_budget_remaining, s.status,
-		       s.last_calculated_at, s.created_at
+		       COALESCE(s.current_percentage, 0), COALESCE(s.error_budget_remaining, 100), 
+		       s.status, COALESCE(s.last_calculated_at, '1970-01-01 00:00:00'), s.created_at
 		FROM slos s
 		JOIN services sv ON s.service_id = sv.id
 		WHERE s.id = $1
@@ -235,8 +247,8 @@ func (s *SLOService) GetSLOsByService(ctx context.Context, serviceID string) ([]
 	query := `
 		SELECT s.id, s.service_id, sv.name as service_name, s.name, s.description,
 		       s.target_percentage, s.window_days, s.sli_type, s.query,
-		       s.current_percentage, s.error_budget_remaining, s.status,
-		       s.last_calculated_at, s.created_at
+		       COALESCE(s.current_percentage, 0), COALESCE(s.error_budget_remaining, 100), 
+		       s.status, COALESCE(s.last_calculated_at, '1970-01-01 00:00:00'), s.created_at
 		FROM slos s
 		JOIN services sv ON s.service_id = sv.id
 		WHERE s.service_id = $1
@@ -273,7 +285,7 @@ func (s *SLOService) GetAllSLOs(ctx context.Context) ([]SLO, error) {
 		SELECT s.id, s.service_id, sv.name as service_name, s.name, s.description,
 		       s.target_percentage, s.window_days, s.sli_type, s.query,
 		       COALESCE(s.current_percentage, 0), COALESCE(s.error_budget_remaining, 100), 
-		       s.status, s.last_calculated_at, s.created_at
+		       s.status, COALESCE(s.last_calculated_at, '1970-01-01 00:00:00'), s.created_at
 		FROM slos s
 		JOIN services sv ON s.service_id = sv.id
 		ORDER BY s.status DESC, sv.name, s.name
@@ -327,10 +339,13 @@ func (s *SLOService) CalculateBurnRate(ctx context.Context, sloID string) ([]SLO
 	for _, window := range windows {
 		_ = end.Add(-window.duration) // start variable unused
 
+		// FIXED: Replace ${WINDOW} with the specific window size for burn rate calculation
+		scopedQuery := strings.ReplaceAll(slo.Query, "${WINDOW}", window.name)
+
 		// Query error budget consumption rate
 		query := fmt.Sprintf(`
 			(1 - (%s)) / (1 - (%f / 100))
-		`, slo.Query, slo.TargetPercentage)
+		`, scopedQuery, slo.TargetPercentage)
 
 		result, err := s.promClient.Query(ctx, query, end)
 		if err != nil {
