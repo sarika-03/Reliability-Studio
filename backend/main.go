@@ -18,6 +18,9 @@ import (
 	"github.com/rs/cors"
 	_ "net/http/pprof"
 	"go.uber.org/zap"
+	
+
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"github.com/sarika-03/Reliability-Studio/clients"
 	"github.com/sarika-03/Reliability-Studio/correlation"
@@ -29,6 +32,12 @@ import (
 	"github.com/sarika-03/Reliability-Studio/stability"
 	"github.com/sarika-03/Reliability-Studio/utils"
 	"github.com/sarika-03/Reliability-Studio/websocket"
+
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
+	"go.opentelemetry.io/otel/sdk/resource"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	semconv "go.opentelemetry.io/otel/semconv/v1.21.0"
 )
 
 type Server struct {
@@ -46,7 +55,30 @@ type Server struct {
 	realtimeServer     *websocket.RealtimeServer
 }
 
+func initTracer() {
+	ctx := context.Background()
+
+	exporter, err := otlptracegrpc.New(ctx,
+		otlptracegrpc.WithEndpoint("tempo:4317"),
+		otlptracegrpc.WithInsecure(),
+	)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	tp := sdktrace.NewTracerProvider(
+		sdktrace.WithBatcher(exporter),
+		sdktrace.WithResource(resource.NewWithAttributes(
+			semconv.SchemaURL,
+			semconv.ServiceName("reliability-backend"),
+		)),
+	)
+
+	otel.SetTracerProvider(tp)
+}
+
 func main() {
+	initTracer()
 	log.Println("🚀 Starting Reliability Studio Backend...")
 
 	// Load configuration
@@ -216,6 +248,8 @@ func main() {
 	// Public routes
 	router.HandleFunc("/health", server.healthHandler).Methods("GET")
 	router.HandleFunc("/api/health", handlers.HandleHealthCheck(healthChecker)).Methods("GET")
+	// Prometheus metrics endpoint (public, no auth required)
+	router.Handle("/metrics", promhttp.Handler())
 	router.HandleFunc("/api/auth/login", middleware.LoginHandler(db)).Methods("POST")
 	router.HandleFunc("/api/auth/register", middleware.RegisterHandler(db)).Methods("POST")
 	router.HandleFunc("/api/auth/refresh", middleware.RefreshTokenHandler()).Methods("POST")
@@ -229,6 +263,7 @@ func main() {
 
 	// Incidents routes
 	api.HandleFunc("/incidents", server.getIncidentsHandler).Methods("GET")
+	api.HandleFunc("/incidents/active", server.getActiveIncidentsHandler).Methods("GET")
 	api.HandleFunc("/incidents", server.createIncidentHandler).Methods("POST")
 	api.HandleFunc("/incidents/{id}", server.getIncidentHandler).Methods("GET")
 	api.HandleFunc("/incidents/{id}", server.updateIncidentHandler).Methods("PATCH")
@@ -562,6 +597,50 @@ func (s *Server) getIncidentsHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(incidents)
 }
 
+func (s *Server) getActiveIncidentsHandler(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	defer cancel()
+
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT i.id, i.title, i.severity, i.status, s.name as service, i.started_at
+		FROM incidents i
+		LEFT JOIN services s ON i.service_id = s.id
+		WHERE i.status != 'resolved'
+		ORDER BY i.started_at DESC
+	`)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to query incidents: %v", err))
+		return
+	}
+	defer rows.Close()
+
+	var incidents []map[string]interface{}
+	for rows.Next() {
+		var id, title, severity, status, service string
+		var startedAt time.Time
+
+		if err := rows.Scan(&id, &title, &severity, &status, &service, &startedAt); err != nil {
+			continue
+		}
+
+		incidents = append(incidents, map[string]interface{}{
+			"id":         id,
+			"title":      title,
+			"severity":   severity,
+			"status":     status,
+			"service":    service,
+			"started_at": startedAt,
+		})
+	}
+
+	if incidents == nil {
+		incidents = make([]map[string]interface{}, 0)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(incidents)
+}
+
 func (s *Server) createIncidentHandler(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Title       string `json:"title"`
@@ -571,7 +650,21 @@ func (s *Server) createIncidentHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		respondError(w, http.StatusBadRequest, "Invalid request")
+		respondError(w, http.StatusBadRequest, fmt.Sprintf("Invalid request body: %v", err))
+		return
+	}
+
+	// Validate required fields
+	if req.Title == "" {
+		respondError(w, http.StatusBadRequest, "Title is required")
+		return
+	}
+	if req.Severity == "" {
+		respondError(w, http.StatusBadRequest, "Severity is required")
+		return
+	}
+	if req.Service == "" {
+		respondError(w, http.StatusBadRequest, "Service is required")
 		return
 	}
 
@@ -584,7 +677,7 @@ func (s *Server) createIncidentHandler(w http.ResponseWriter, r *http.Request) {
 	`, req.Service).Scan(&serviceID)
 
 	if err != nil {
-		respondError(w, http.StatusInternalServerError, "Failed to create service")
+		respondError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to create service: %v", err))
 		return
 	}
 
@@ -592,12 +685,12 @@ func (s *Server) createIncidentHandler(w http.ResponseWriter, r *http.Request) {
 	var incidentID string
 	err = s.db.QueryRow(`
 		INSERT INTO incidents (title, description, severity, status, service_id)
-		VALUES ($1, $2, $3, 'active', $4)
+		VALUES ($1, $2, $3, 'open', $4)
 		RETURNING id
 	`, req.Title, req.Description, req.Severity, serviceID).Scan(&incidentID)
 
 	if err != nil {
-		respondError(w, http.StatusInternalServerError, "Failed to create incident")
+		respondError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to create incident: %v", err))
 		return
 	}
 
@@ -607,7 +700,16 @@ func (s *Server) createIncidentHandler(w http.ResponseWriter, r *http.Request) {
 		_, _ = s.correlationEngine.CorrelateIncident(ctx, incidentID, req.Service, "default", time.Now())
 	}()
 
-	respondJSON(w, http.StatusCreated, map[string]string{"id": incidentID})
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"id":         incidentID,
+		"title":      req.Title,
+		"severity":   req.Severity,
+		"status":     "open",
+		"service":    req.Service,
+		"created_at": time.Now(),
+	})
 }
 
 func (s *Server) getIncidentHandler(w http.ResponseWriter, r *http.Request) {
@@ -751,7 +853,7 @@ func (s *Server) getIncidentAnalysisHandler(w http.ResponseWriter, r *http.Reque
 func (s *Server) getSLOsHandler(w http.ResponseWriter, r *http.Request) {
 	slos, err := s.sloService.GetAllSLOs(context.Background())
 	if err != nil {
-		respondError(w, http.StatusInternalServerError, "Failed to get SLOs")
+		respondError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to retrieve SLOs: %v", err))
 		return
 	}
 
@@ -761,12 +863,12 @@ func (s *Server) getSLOsHandler(w http.ResponseWriter, r *http.Request) {
 func (s *Server) createSLOHandler(w http.ResponseWriter, r *http.Request) {
 	var slo services.SLO
 	if err := json.NewDecoder(r.Body).Decode(&slo); err != nil {
-		respondError(w, http.StatusBadRequest, "Invalid request")
+		respondError(w, http.StatusBadRequest, fmt.Sprintf("Invalid SLO request body: %v", err))
 		return
 	}
 
 	if err := s.sloService.CreateSLO(context.Background(), &slo); err != nil {
-		respondError(w, http.StatusInternalServerError, "Failed to create SLO")
+		respondError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to create SLO: %v", err))
 		return
 	}
 
@@ -779,7 +881,7 @@ func (s *Server) getSLOHandler(w http.ResponseWriter, r *http.Request) {
 
 	slo, err := s.sloService.GetSLO(context.Background(), sloID)
 	if err != nil {
-		respondError(w, http.StatusNotFound, "SLO not found")
+		respondError(w, http.StatusNotFound, fmt.Sprintf("SLO not found: %v", err))
 		return
 	}
 
@@ -792,13 +894,13 @@ func (s *Server) updateSLOHandler(w http.ResponseWriter, r *http.Request) {
 
 	var slo services.SLO
 	if err := json.NewDecoder(r.Body).Decode(&slo); err != nil {
-		respondError(w, http.StatusBadRequest, "Invalid request")
+		respondError(w, http.StatusBadRequest, fmt.Sprintf("Invalid SLO request body: %v", err))
 		return
 	}
 	slo.ID = sloID
 
 	if err := s.sloService.UpdateSLO(context.Background(), &slo); err != nil {
-		respondError(w, http.StatusInternalServerError, "Failed to update SLO")
+		respondError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to update SLO: %v", err))
 		return
 	}
 
@@ -811,7 +913,7 @@ func (s *Server) deleteSLOHandler(w http.ResponseWriter, r *http.Request) {
 
 	err := s.sloService.DeleteSLO(context.Background(), sloID)
 	if err != nil {
-		respondError(w, http.StatusInternalServerError, "Failed to delete SLO")
+		respondError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to delete SLO: %v", err))
 		return
 	}
 
@@ -824,7 +926,7 @@ func (s *Server) calculateSLOHandler(w http.ResponseWriter, r *http.Request) {
 
 	analysis, err := s.sloService.CalculateSLO(context.Background(), sloID)
 	if err != nil {
-		respondError(w, http.StatusInternalServerError, "Failed to calculate SLO")
+		respondError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to calculate SLO: %v", err))
 		return
 	}
 
@@ -837,7 +939,7 @@ func (s *Server) getSLOHistoryHandler(w http.ResponseWriter, r *http.Request) {
 
 	history, err := s.sloService.GetSLOHistory(context.Background(), sloID)
 	if err != nil {
-		respondError(w, http.StatusInternalServerError, "Failed to get SLO history")
+		respondError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to retrieve SLO history: %v", err))
 		return
 	}
 

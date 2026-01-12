@@ -383,6 +383,20 @@ func (d *IncidentDetector) processDetectionEvent(ctx context.Context, event Dete
 	d.logger.Printf("🔨 CREATING INCIDENT: id=%s, title=%s, service=%s, severity=%s, value=%.4f, threshold=%.4f\n",
 		incidentID, incidentTitle, serviceName, event.Severity, event.Value, threshold)
 
+	// Use transaction to ensure atomic incident + timeline event creation
+	tx, err := d.db.BeginTx(ctx, nil)
+	if err != nil {
+		d.logger.Printf("ERROR: Failed to begin transaction for incident creation: %v\n", err)
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer func() {
+		if err != nil {
+			if rollbackErr := tx.Rollback(); rollbackErr != nil {
+				d.logger.Printf("ERROR: Failed to rollback transaction: %v\n", rollbackErr)
+			}
+		}
+	}()
+
 	// Insert incident with service_id
 	var query string
 	var args []interface{}
@@ -406,9 +420,10 @@ func (d *IncidentDetector) processDetectionEvent(ctx context.Context, event Dete
 		}
 	}
 	
-	_, err = d.db.ExecContext(ctx, query, args...)
+	_, err = tx.ExecContext(ctx, query, args...)
 	if err != nil {
-		return fmt.Errorf("failed to create incident: %w", err)
+		d.logger.Printf("ERROR: Failed to insert incident record: %v (query: %s, serviceID: %s)\n", err, query, serviceID)
+		return fmt.Errorf("failed to create incident in database: %w", err)
 	}
 
 	// Add timeline event for the detection (FIXED: correct parameter order)
@@ -418,13 +433,23 @@ func (d *IncidentDetector) processDetectionEvent(ctx context.Context, event Dete
 		INSERT INTO timeline_events (id, incident_id, event_type, timestamp, source, title, description, metadata)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 	`
-	_, err = d.db.ExecContext(ctx, timelineQuery,
+	_, err = tx.ExecContext(ctx, timelineQuery,
 		timelineID, incidentID, "metric_anomaly", event.Timestamp, "prometheus",
 		fmt.Sprintf("Detected: %s", event.RuleName), fmt.Sprintf("Automated detection triggered: %s (value: %.2f)", event.RuleName, event.Value), eventMetadata,
 	)
 	if err != nil {
-		d.logger.Printf("Warning: Failed to add timeline event: %v\n", err)
-	} else if d.timelineCallback != nil {
+		d.logger.Printf("ERROR: Failed to insert timeline event: %v (incident_id: %s)\n", err, incidentID)
+		return fmt.Errorf("failed to create timeline event: %w", err)
+	}
+
+	// Commit transaction - ensure both incident and timeline event are persisted
+	if err := tx.Commit(); err != nil {
+		d.logger.Printf("ERROR: Failed to commit transaction: %v\n", err)
+		return fmt.Errorf("failed to commit incident transaction: %w", err)
+	}
+
+	// After successful commit, invoke callback
+	if d.timelineCallback != nil {
 		d.timelineCallback(map[string]interface{}{
 			"id":          timelineID,
 			"incident_id": incidentID,

@@ -144,31 +144,64 @@ export function Timeline({ events }: TimelineProps) {
             <h3 className={styles.sectionTitle}>Incident Timeline</h3>
             <div className={styles.timeline}>
                 {events.length === 0 ? (
-                    <div style={{ color: theme.textMuted, fontSize: '13px' }}>
-                        No events recorded for this incident yet.
+                    <div style={{
+                        display: 'flex',
+                        flexDirection: 'column',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        padding: '40px 20px',
+                        color: theme.textMuted,
+                        textAlign: 'center',
+                        gap: '12px',
+                    }}>
+                        <div style={{ fontSize: '24px' }}>📋</div>
+                        <div>
+                            <div style={{ fontSize: '13px', fontWeight: 600, marginBottom: '4px' }}>No timeline events yet</div>
+                            <div style={{ fontSize: '12px' }}>Events will appear as the incident progresses</div>
+                        </div>
                     </div>
                 ) : (
-                    events.map((event) => (
-                        <div key={event.id} className={styles.event}>
-                            <div className={styles.iconWrapper(event.type)}>
-                                {getEventIcon(event.type)}
-                            </div>
-                            <div className={styles.eventContent}>
-                                <div className={styles.eventHeader}>
-                                    <div className={styles.eventTitle}>{event.title}</div>
-                                    <div className={styles.eventTime}>
-                                        {new Date(event.timestamp).toLocaleTimeString()}
-                                    </div>
-                                </div>
-                                <div className={styles.eventDesc}>{event.description}</div>
-                                {event.metadata && Object.keys(event.metadata).length > 0 && (
-                                    <pre className={styles.metadata}>
-                                        {JSON.stringify(event.metadata, null, 2)}
-                                    </pre>
-                                )}
-                            </div>
+                    <>
+                        <div style={{
+                            fontSize: '12px',
+                            color: theme.textMuted,
+                            marginBottom: '20px',
+                            padding: '12px 0 0 24px',
+                        }}>
+                            {events.length} event(s) recorded
                         </div>
-                    ))
+                        {events.map((event) => (
+                            <div key={event.id} className={styles.event}>
+                                <div className={styles.iconWrapper(event.type)}>
+                                    {getEventIcon(event.type)}
+                                </div>
+                                <div className={styles.eventContent}>
+                                    <div className={styles.eventHeader}>
+                                        <div className={styles.eventTitle}>{event.title}</div>
+                                        <div className={styles.eventTime}>
+                                            {new Date(event.timestamp).toLocaleTimeString()}
+                                        </div>
+                                    </div>
+                                    <div className={styles.eventDesc}>{event.description}</div>
+                                    {event.metadata && Object.keys(event.metadata).length > 0 && (
+                                        <details style={{ marginTop: '12px' }}>
+                                            <summary style={{
+                                                fontSize: '11px',
+                                                color: theme.accent,
+                                                cursor: 'pointer',
+                                                fontWeight: 600,
+                                            }}>
+                                                Show metadata
+                                            </summary>
+                                            <pre className={styles.metadata}>
+                                                {JSON.stringify(event.metadata, null, 2)}
+                                            </pre>
+                                        </details>
+                                    )}
+                                </div>
+                            </div>
+                        ))}
+                    </>
                 )}
             </div>
         </div>

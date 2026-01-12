@@ -1,22 +1,61 @@
 global:
-  scrape_interval: 5s
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    cluster: 'reliability-studio'
+    environment: 'development'
 
 scrape_configs:
-  - job_name: "prometheus"
+  # Prometheus self-monitoring
+  - job_name: 'prometheus'
     static_configs:
-      - targets: ["prometheus:9090"]
+      - targets: ['prometheus:9090']
 
-  - job_name: "backend"
+  # Backend API service metrics
+  - job_name: 'backend'
     metrics_path: /metrics
+    scrape_interval: 10s
+    scrape_timeout: 5s
     static_configs:
-      - targets: ["backend:9000"]
+      - targets: ['backend:9000']
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: instance
 
-  - job_name: "test-app"
+  # Test application metrics
+  - job_name: 'test-app'
     metrics_path: /metrics
+    scrape_interval: 10s
+    scrape_timeout: 5s
     static_configs:
-      - targets: ["test-app:5000"]
+      - targets: ['test-app:5000']
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: instance
 
-  - job_name: "pushgateway"
+  # PushGateway (for batch jobs and short-lived tasks)
+  - job_name: 'pushgateway'
     honor_labels: true
+    scrape_interval: 10s
     static_configs:
-      - targets: ["pushgateway:9091"]
+      - targets: ['pushgateway:9091']
+
+  # Loki metrics (if exposed)
+  - job_name: 'loki'
+    scrape_interval: 30s
+    static_configs:
+      - targets: ['loki:3100']
+    metrics_path: /metrics
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: instance
+
+  # Tempo metrics (if exposed)  
+  - job_name: 'tempo'
+    scrape_interval: 30s
+    static_configs:
+      - targets: ['tempo:3200']
+    metrics_path: /metrics
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: instance

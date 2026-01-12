@@ -82,17 +82,18 @@ func (s *SLOService) CalculateSLO(ctx context.Context, sloID string) (*SLOAnalys
 
 	// Parse result
 	if len(result.Data.Result) == 0 {
-		return nil, fmt.Errorf("no data returned from SLO query")
+		return nil, fmt.Errorf("no data returned from SLO query for SLO '%s' (id=%s, window=%s): query=%s (ensure metric labels are correct and within retention period)", 
+			slo.Name, sloID, window, query)
 	}
 
 	valueStr, ok := result.Data.Result[0].Value[1].(string)
 	if !ok {
-		return nil, fmt.Errorf("invalid value type in result")
+		return nil, fmt.Errorf("invalid value type in Prometheus result for SLO '%s': expected string, got %T", slo.Name, result.Data.Result[0].Value[1])
 	}
 
 	var currentPercentage float64
 	if _, err := fmt.Sscanf(valueStr, "%f", &currentPercentage); err != nil {
-		return nil, fmt.Errorf("failed to parse SLO value: %w", err)
+		return nil, fmt.Errorf("failed to parse SLO value '%s' for '%s': %w (ensure SLO query returns a numeric value)", valueStr, slo.Name, err)
 	}
 
 	// Calculate error budget - FIXED: Robust calculation with overspend tracking

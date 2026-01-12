@@ -1,5 +1,5 @@
 import React from 'react';
-import { IncidentControlRoom } from '../components/IncidentControlRoom';
+import { IncidentControlRoom } from '../components/IncidentControlRoom-v2';
 import { ErrorBoundary } from './components/ErrorBoundary';
 
 export const App = () => {

@@ -12,9 +12,12 @@ services:
       GF_APP_MODE: "production"
       GF_FEATURE_TOGGLES_DISABLE_ANGULAR: "true"
     volumes:
-      - ..:/var/lib/grafana/plugins/sarika-reliability-studio-app
+      - ../dist:/var/lib/grafana/plugins/reliability-studio
+      - ./grafana.ini:/etc/grafana/grafana.ini
       - ./grafana/provisioning:/etc/grafana/provisioning
     depends_on:
+      backend:
+        condition: service_healthy
       prometheus:
         condition: service_healthy
       loki:
@@ -27,7 +30,6 @@ services:
       timeout: 5s
       retries: 5
     restart: unless-stopped
-
 
   prometheus:
     image: prom/prometheus:latest
@@ -43,7 +45,6 @@ services:
       retries: 60
     restart: unless-stopped
 
-
   loki:
     image: grafana/loki:2.9.3
     container_name: loki
@@ -58,7 +59,6 @@ services:
       timeout: 5s
       retries: 60
     restart: unless-stopped
-
 
   tempo:
     image: grafana/tempo:2.4.1
@@ -76,14 +76,12 @@ services:
       retries: 20
       start_period: 20s
 
-
   pushgateway:
     image: prom/pushgateway:v1.8.0
     container_name: pushgateway
     ports:
       - "19092:9091"
     restart: unless-stopped
-
 
   postgres:
     image: postgres:15-alpine
@@ -103,6 +101,29 @@ services:
       retries: 60
     restart: unless-stopped
 
+  promtail:
+    image: grafana/promtail:2.9.3
+    container_name: promtail
+    ports:
+      - "9080:9080"
+    volumes:
+      # Docker logs
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Promtail config
+      - ./promtail.yml:/etc/promtail/config.yml
+      # Position file (persistent across restarts)
+      - promtail_positions:/tmp
+    command: -config.file=/etc/promtail/config.yml
+    depends_on:
+      loki:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:9080/ready || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
 
   backend:
     build: ../backend
@@ -138,7 +159,6 @@ services:
       retries: 30
     restart: unless-stopped
 
-
   test-app:
     build: ../test-app
     container_name: test-app
@@ -161,6 +181,6 @@ services:
       retries: 30
     restart: unless-stopped
 
-
 volumes:
   postgres_data:
+  promtail_positions:

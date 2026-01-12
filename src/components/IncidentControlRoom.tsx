@@ -202,9 +202,12 @@ export function IncidentControlRoom() {
     const [selectedIncident, setSelectedIncident] = useState<any>(null);
     const [timelineEvents, setTimelineEvents] = useState<any[]>([]);
     const [loading, setLoading] = useState(true);
+    const [error, setError] = useState<string | null>(null);
+    const [timelineLoading, setTimelineLoading] = useState(false);
+    const [incidentsLoading, setIncidentsLoading] = useState(false);
     const [services, setServices] = useState<string[]>([]);
+    const [servicesError, setServicesError] = useState<string | null>(null);
     const [selectedService, setSelectedService] = useState<string>(() => {
-        // Initialize from localStorage, default to 'payment-service'
         return localStorage.getItem('selectedService') || 'payment-service';
     });
 
@@ -218,17 +221,18 @@ export function IncidentControlRoom() {
 
     const loadServices = async () => {
         try {
+            setServicesError(null);
             const data = await backendAPI.services.list();
             const serviceNames = data.map((s: any) => s.name);
             setServices(serviceNames);
 
-            // If payment-service exists and no service is selected, select it
             if (serviceNames.includes('payment-service') && !localStorage.getItem('selectedService')) {
                 handleServiceChange('payment-service');
             }
         } catch (err) {
-            console.error('Failed to load services', err);
-            // Fallback to common services
+            const errorMsg = err instanceof Error ? err.message : 'Failed to load services';
+            console.error('[IncidentControlRoom] Failed to load services:', errorMsg);
+            setServicesError(errorMsg);
             setServices(['payment-service', 'api-gateway', 'user-service', 'frontend-web']);
         }
     };
@@ -236,34 +240,59 @@ export function IncidentControlRoom() {
     const handleServiceChange = (service: string) => {
         setSelectedService(service);
         localStorage.setItem('selectedService', service);
-        setSelectedIncident(null); // Clear selected incident when changing service
+        setSelectedIncident(null);
+        setTimelineEvents([]);
     };
 
     const loadIncidents = async () => {
         try {
+            setIncidentsLoading(true);
+            setError(null);
             const data = await backendAPI.incidents.list();
-            // Filter by selected service if one is selected
+            
             const filteredData = selectedService
                 ? data.filter((inc: any) => inc.service === selectedService)
                 : data;
+            
             setIncidents(filteredData);
+            
+            // Auto-select first incident if none selected
             if (filteredData.length > 0 && !selectedIncident) {
+                console.log('[IncidentControlRoom] Auto-selecting first incident:', filteredData[0].id);
                 handleSelectIncident(filteredData[0]);
+            } else if (filteredData.length === 0) {
+                console.log('[IncidentControlRoom] No incidents found for service:', selectedService);
+                setSelectedIncident(null);
+                setTimelineEvents([]);
             }
         } catch (err) {
-            console.error('Failed to load incidents', err);
+            const errorMsg = err instanceof Error ? err.message : 'Failed to load incidents';
+            console.error('[IncidentControlRoom] Failed to load incidents:', errorMsg);
+            setError(errorMsg);
+            setIncidents([]);
         } finally {
+            setIncidentsLoading(false);
             setLoading(false);
         }
     };
 
     const handleSelectIncident = async (incident: any) => {
-        setSelectedIncident(incident);
         try {
+            console.log('[IncidentControlRoom] Selecting incident:', incident.id);
+            setSelectedIncident(incident);
+            setTimelineLoading(true);
+            setError(null);
+            
             const events = await backendAPI.incidents.getTimeline(incident.id);
+            console.log('[IncidentControlRoom] Loaded timeline events:', events.length);
             setTimelineEvents(events);
         } catch (err) {
-            console.error('Failed to load timeline', err);
+            const errorMsg = err instanceof Error ? err.message : 'Failed to load timeline';
+            console.error('[IncidentControlRoom] Failed to load timeline:', errorMsg);
+            setError(errorMsg);
+            setTimelineEvents([]);
+        } finally {
+            setTimelineLoading(false);
         }
     };
 
@@ -292,21 +321,60 @@ export function IncidentControlRoom() {
 
     const acknowledgeIncident = async (id: string) => {
         try {
+            console.log('[IncidentControlRoom] Acknowledging incident:', id);
             await backendAPI.incidents.update(id, { status: 'investigating' });
+            setIncidents(prev =>
+                prev.map(i => i.id === id ? { ...i, status: 'investigating' } : i)
+            );
+            if (selectedIncident?.id === id) {
+                setSelectedIncident(prev => ({ ...prev, status: 'investigating' }));
+            }
         } catch (err) {
-            console.error('Failed to acknowledge', err);
+            const errorMsg = err instanceof Error ? err.message : 'Failed to acknowledge incident';
+            console.error('[IncidentControlRoom] Failed to acknowledge:', errorMsg);
+            setError(errorMsg);
         }
     };
 
     const resolveIncident = async (id: string) => {
         try {
+            console.log('[IncidentControlRoom] Resolving incident:', id);
             await backendAPI.incidents.update(id, { status: 'resolved' });
+            setIncidents(prev =>
+                prev.map(i => i.id === id ? { ...i, status: 'resolved' } : i)
+            );
+            if (selectedIncident?.id === id) {
+                setSelectedIncident(prev => ({ ...prev, status: 'resolved' }));
+            }
         } catch (err) {
-            console.error('Failed to resolve', err);
+            const errorMsg = err instanceof Error ? err.message : 'Failed to resolve incident';
+            console.error('[IncidentControlRoom] Failed to resolve:', errorMsg);
+            setError(errorMsg);
         }
     };
 
-    if (loading) return <div className={styles.emptyState}>Initializing Control Room...</div>;
+    if (loading) {
+        return (
+            <div className={styles.container}>
+                <div className={styles.sidebar}>
+                    <div className={styles.sidebarHeader}>
+                        <div className={styles.liveDot} />
+                        <span>Active Incidents</span>
+                    </div>
+                    <div className={styles.emptyState}>
+                        <div style={{ fontSize: '14px', fontWeight: 500 }}>📊 Initializing Control Room</div>
+                        <div style={{ fontSize: '12px', marginTop: '8px', color: theme.textMuted }}>Loading services and incidents...</div>
+                    </div>
+                </div>
+                <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: theme.textMuted }}>
+                    <div style={{ textAlign: 'center' }}>
+                        <div style={{ fontSize: '24px', marginBottom: '12px' }}>⏳</div>
+                        <div>Initializing</div>
+                    </div>
+                </div>
+            </div>
+        );
+    }
 
     return (
         <div className={styles.container}>
@@ -316,6 +384,20 @@ export function IncidentControlRoom() {
                     <div className={styles.liveDot} />
                     <span>Active Incidents</span>
                 </div>
+
+                {/* Error State */}
+                {servicesError && (
+                    <div style={{
+                        padding: '12px 20px',
+                        background: 'rgba(244, 67, 54, 0.1)',
+                        borderBottom: '1px solid #f44336',
+                        fontSize: '12px',
+                        color: '#ff9999',
+                    }}>
+                        ❌ Services error: {servicesError}
+                    </div>
+                )}
+
                 <div style={{ padding: '10px 20px', borderBottom: `1px solid ${theme.border}` }}>
                     <label style={{ fontSize: '11px', color: theme.textMuted, marginBottom: '6px', display: 'block' }}>
                         Service Filter
@@ -342,9 +424,44 @@ export function IncidentControlRoom() {
                         ))}
                     </select>
                 </div>
+
                 <div className={styles.incidentList}>
-                    {incidents.length === 0 ? (
-                        <div className={styles.emptyState}>No active incidents</div>
+                    {incidentsLoading ? (
+                        <div className={styles.emptyState}>
+                            <div style={{ fontSize: '14px', fontWeight: 500 }}>📋 Loading incidents</div>
+                            <div style={{ fontSize: '12px', marginTop: '8px', color: theme.textMuted }}>Fetching from backend...</div>
+                        </div>
+                    ) : error ? (
+                        <div style={{
+                            padding: '20px',
+                            background: 'rgba(244, 67, 54, 0.1)',
+                            borderRadius: '4px',
+                            margin: '10px',
+                            fontSize: '12px',
+                            color: '#ff9999',
+                        }}>
+                            <div style={{ fontWeight: 600, marginBottom: '8px' }}>❌ Failed to load incidents</div>
+                            <div style={{ fontSize: '11px', marginBottom: '12px' }}>{error}</div>
+                            <button
+                                onClick={() => loadIncidents()}
+                                style={{
+                                    padding: '6px 12px',
+                                    background: '#f44336',
+                                    border: 'none',
+                                    borderRadius: '3px',
+                                    color: '#fff',
+                                    fontSize: '11px',
+                                    cursor: 'pointer',
+                                }}
+                            >
+                                Retry
+                            </button>
+                        </div>
+                    ) : incidents.length === 0 ? (
+                        <div className={styles.emptyState}>
+                            <div style={{ fontSize: '14px', fontWeight: 500 }}>✅ No active incidents</div>
+                            <div style={{ fontSize: '12px', marginTop: '8px', color: theme.textMuted }}>All systems healthy</div>
+                        </div>
                     ) : (
                         incidents.map((incident) => (
                             <div
@@ -365,6 +482,33 @@ export function IncidentControlRoom() {
 
             {/* Main Content Area */}
             <div className={styles.mainContent}>
+                {error && (
+                    <div style={{
+                        padding: '16px',
+                        background: 'rgba(244, 67, 54, 0.1)',
+                        borderBottom: '1px solid #f44336',
+                        color: '#ff9999',
+                        fontSize: '12px',
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center',
+                    }}>
+                        <span>❌ Error: {error}</span>
+                        <button
+                            onClick={() => setError(null)}
+                            style={{
+                                background: 'transparent',
+                                border: 'none',
+                                color: '#ff9999',
+                                cursor: 'pointer',
+                                fontSize: '18px',
+                            }}
+                        >
+                            ×
+                        </button>
+                    </div>
+                )}
+
                 {selectedIncident ? (
                     <>
                         <div className={styles.header}>
@@ -407,7 +551,21 @@ export function IncidentControlRoom() {
 
                         <div className={styles.contentGrid}>
                             {/* Timeline Stream */}
-                            <Timeline events={timelineEvents} />
+                            {timelineLoading ? (
+                                <div style={{
+                                    display: 'flex',
+                                    flexDirection: 'column',
+                                    alignItems: 'center',
+                                    justifyContent: 'center',
+                                    color: theme.textMuted,
+                                    gap: '12px',
+                                }}>
+                                    <div style={{ fontSize: '24px' }}>⏳</div>
+                                    <div style={{ fontSize: '12px' }}>Loading timeline events...</div>
+                                </div>
+                            ) : (
+                                <Timeline events={timelineEvents} />
+                            )}
 
                             {/* Telemetry Tabs */}
                             <div className={styles.tabContainer}>
@@ -420,8 +578,13 @@ export function IncidentControlRoom() {
                     </>
                 ) : (
                     <div className={styles.emptyState}>
-                        <h2>Select an incident to investigate</h2>
-                        <p>Ready to monitor your infrastructure reliability.</p>
+                        <div style={{ fontSize: '24px', marginBottom: '12px' }}>👋</div>
+                        <h2 style={{ margin: '0 0 8px 0' }}>Select an incident to investigate</h2>
+                        <p style={{ margin: '0', color: theme.textMuted }}>
+                            {incidents.length > 0
+                                ? 'Click on an incident in the left sidebar to view details, timeline, and telemetry.'
+                                : 'All systems are healthy. No active incidents detected.'}
+                        </p>
                     </div>
                 )}
             </div>

@@ -1,4 +1,4 @@
-const API_BASE = "http://localhost:9000/api";
+const API_BASE = "http://reliability-backend:9000/api";
 
 import { retry, isRetryableError } from '../../utils/retry-logic';
 import { circuitBreakerManager } from '../../utils/circuit-breaker';
@@ -12,11 +12,29 @@ interface ApiError {
   status: number;
   message: string;
   isTokenExpired: boolean;
+  traceId?: string;  // Trace ID from response headers
+  requestId?: string; // Request ID for debugging
+  endpoint?: string;  // API endpoint for context
+  method?: string;    // HTTP method for context
+  duration?: number;  // Request duration in ms
+}
+
+// Generate unique trace ID for request tracking
+function generateTraceId(): string {
+  const timestamp = Date.now().toString(36);
+  const random = Math.random().toString(36).substring(2, 9);
+  return `${timestamp}-${random}`;
 }
 
 class ApiErrorHandler {
-  static async handle(response: Response): Promise<ApiError> {
+  static async handle(response: Response, context: {
+    endpoint: string;
+    method: string;
+    traceId: string;
+    duration: number;
+  }): Promise<ApiError> {
     const errorData = await response.json().catch(() => ({ error: 'Unknown error' }));
+    const responseTraceId = response.headers.get('x-trace-id') || context.traceId;
 
     // Check for 401 Unauthorized (token expired or invalid)
     if (response.status === 401) {
@@ -24,6 +42,10 @@ class ApiErrorHandler {
         status: response.status,
         message: 'Your session has expired. Please login again.',
         isTokenExpired: true,
+        traceId: responseTraceId,
+        endpoint: context.endpoint,
+        method: context.method,
+        duration: context.duration,
       };
     }
 
@@ -33,6 +55,10 @@ class ApiErrorHandler {
         status: response.status,
         message: 'Too many requests. Please wait a moment and try again.',
         isTokenExpired: false,
+        traceId: responseTraceId,
+        endpoint: context.endpoint,
+        method: context.method,
+        duration: context.duration,
       };
     }
 
@@ -42,13 +68,24 @@ class ApiErrorHandler {
         status: response.status,
         message: 'Access forbidden. Your account may be locked due to failed login attempts.',
         isTokenExpired: false,
+        traceId: responseTraceId,
+        endpoint: context.endpoint,
+        method: context.method,
+        duration: context.duration,
       };
     }
 
+    // Generic error response
+    const message = errorData.error || errorData.message || `API error: ${response.statusText}`;
     return {
       status: response.status,
-      message: errorData.error || `API error: ${response.statusText}`,
+      message: `${message} (${response.status})`,
       isTokenExpired: false,
+      traceId: responseTraceId,
+      endpoint: context.endpoint,
+      method: context.method,
+      duration: context.duration,
+      requestId: errorData.request_id || errorData.requestId,
     };
   }
 }
@@ -62,12 +99,17 @@ export function setTokenExpiredCallback(callback: () => void) {
 
 async function apiFetch<T>(endpoint: string, options: FetchOptions = {}): Promise<T> {
   const { body, serviceName = 'backend-api', ...customConfig } = options;
+  const traceId = generateTraceId();
+  const method = customConfig.method || 'GET';
+  const startTime = performance.now();
 
   // Get token from localStorage
   const token = localStorage.getItem('access_token');
 
   const headers = {
     'Content-Type': 'application/json',
+    'X-Trace-ID': traceId,  // Send trace ID to backend
+    'X-Request-Started': new Date().toISOString(),
     ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
     ...customConfig.headers,
   };
@@ -81,13 +123,33 @@ async function apiFetch<T>(endpoint: string, options: FetchOptions = {}): Promis
     config.body = JSON.stringify(body);
   }
 
+  // Log request
+  console.log(`[API] ${method} ${endpoint} (trace: ${traceId})`);
+
   // Use retry logic with circuit breaker
   return retry(
     async () => {
       const response = await fetch(`${API_BASE}${endpoint}`, config);
+      const duration = Math.round(performance.now() - startTime);
 
       if (!response.ok) {
-        const apiError = await ApiErrorHandler.handle(response);
+        const apiError = await ApiErrorHandler.handle(response, {
+          endpoint,
+          method,
+          traceId,
+          duration,
+        });
+
+        // Log error with full context
+        console.error(
+          `[API] Error ${method} ${endpoint}: ${apiError.message}`,
+          {
+            status: apiError.status,
+            traceId: apiError.traceId,
+            requestId: apiError.requestId,
+            duration: `${duration}ms`,
+          }
+        );
 
         // Handle token expiration globally
         if (apiError.isTokenExpired) {
@@ -98,9 +160,17 @@ async function apiFetch<T>(endpoint: string, options: FetchOptions = {}): Promis
           }
         }
 
-        const error = new Error(apiError.message) as Error & { status?: number; isTokenExpired?: boolean };
-        error.status = apiError.status;
-        error.isTokenExpired = apiError.isTokenExpired;
+        // Create error object with trace ID and other context
+        const error = new Error(apiError.message) as Error & ApiError;
+        Object.assign(error, {
+          status: apiError.status,
+          traceId: apiError.traceId,
+          requestId: apiError.requestId,
+          endpoint: apiError.endpoint,
+          method: apiError.method,
+          duration: apiError.duration,
+          isTokenExpired: apiError.isTokenExpired,
+        });
 
         // Don't retry non-retryable errors
         if (!isRetryableError(error) && apiError.status !== 503) {
@@ -110,7 +180,13 @@ async function apiFetch<T>(endpoint: string, options: FetchOptions = {}): Promis
         throw error;
       }
 
-      return await response.json();
+      const responseData = await response.json();
+      const duration = Math.round(performance.now() - startTime);
+      
+      // Log successful request
+      console.log(`[API] ✓ ${method} ${endpoint} (${duration}ms, trace: ${traceId})`);
+
+      return responseData;
     },
     serviceName,
     { maxAttempts: 3, initialDelay: 1000, maxDelay: 8000 }
@@ -123,7 +199,15 @@ async function apiFetch<T>(endpoint: string, options: FetchOptions = {}): Promis
 
     // If not successful, throw the actual error from retry logic
     const fetchError = result.error || new Error('Failed to fetch data');
-    console.error(`[API] Request failed for ${endpoint}:`, fetchError);
+    const errorWithTrace = fetchError as any;
+    if (errorWithTrace.traceId) {
+      console.error(
+        `[API] Request failed for ${endpoint}: ${fetchError.message}`,
+        `(trace: ${errorWithTrace.traceId})`
+      );
+    } else {
+      console.error(`[API] Request failed for ${endpoint}:`, fetchError);
+    }
     throw fetchError;
   });
 }

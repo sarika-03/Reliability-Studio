@@ -1,0 +1,48 @@
+server:
+  http_listen_port: 9080
+  grpc_listen_port: 0
+
+positions:
+  filename: /tmp/positions.yaml
+
+clients:
+  - url: http://loki:3100/loki/api/v1/push
+    # Batch logs for efficiency
+    batchwait: 1s
+    batchsize: 1024
+
+scrape_configs:
+  # Docker container logs via JSON log driver
+  - job_name: docker
+    static_configs:
+      - targets:
+          - localhost
+        labels:
+          job: docker
+          __path__: /var/lib/docker/containers/*/*-json.log
+    
+    # Parse JSON log format from Docker daemon
+    pipeline_stages:
+      - json:
+          expressions:
+            log: log
+            stream: stream
+            container_id: container_id
+            container_name: container_name
+      
+      # Extract container name into label
+      - regex:
+          expression: '^(?P<container_name>[^/]+)'
+          source: container_name
+      
+      # Set labels from extracted fields
+      - labels:
+          stream:
+          container_name:
+      
+      # Format the final log message
+      - output:
+          source: log
+
+  # Kubernetes/Systemd logs (if running on k8s)
+

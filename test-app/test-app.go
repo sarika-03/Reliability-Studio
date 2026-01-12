@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -10,6 +11,12 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
+	"go.opentelemetry.io/otel/sdk/resource"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	semconv "go.opentelemetry.io/otel/semconv/v1.21.0"
 )
 
 var (
@@ -56,10 +63,37 @@ func metricsHandler(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "test_app_avg_latency_seconds %f\n", avgLatency)
 }
 
+func initTracer() {
+	ctx := context.Background()
+
+	exporter, err := otlptracegrpc.New(ctx,
+		otlptracegrpc.WithEndpoint("tempo:4317"),
+		otlptracegrpc.WithInsecure(),
+	)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	tp := sdktrace.NewTracerProvider(
+		sdktrace.WithBatcher(exporter),
+		sdktrace.WithResource(resource.NewWithAttributes(
+			semconv.SchemaURL,
+			semconv.ServiceName("test-app"),
+		)),
+	)
+
+	otel.SetTracerProvider(tp)
+}
+
 func main() {
+	initTracer()
 	http.HandleFunc("/metrics", metricsHandler)
 
 	http.HandleFunc("/slow", func(w http.ResponseWriter, r *http.Request) {
+		tracer := otel.Tracer("test-app")
+		_, span := tracer.Start(r.Context(), "GET /slow")
+		defer span.End()
+
 		start := time.Now()
 		sleep := time.Duration(rand.Intn(1000)) * time.Millisecond
 		time.Sleep(sleep)
@@ -70,6 +104,10 @@ func main() {
 	})
 
 	http.HandleFunc("/error", func(w http.ResponseWriter, r *http.Request) {
+		tracer := otel.Tracer("test-app")
+		_, span := tracer.Start(r.Context(), "GET /error")
+		defer span.End()
+
 		start := time.Now()
 		latency := time.Since(start)
 		recordMetric("/error", latency, true)
@@ -78,6 +116,10 @@ func main() {
 	})
 
 	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		tracer := otel.Tracer("test-app")
+		_, span := tracer.Start(r.Context(), "GET /health")
+		defer span.End()
+
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"status": "ok", "uptime": time.Since(startTime).String()})
 	})

@@ -28,7 +28,7 @@ interface UseRealtimeOptions {
  * ```
  */
 export function useRealtime({
-  url = import.meta.env.VITE_WS_URL || 'ws://localhost:9000/api/realtime',
+  url = import.meta.env.VITE_WS_URL || 'ws://reliability-backend:9000/api/realtime',
   onIncidentCreated,
   onIncidentUpdated,
   onCorrelationFound,

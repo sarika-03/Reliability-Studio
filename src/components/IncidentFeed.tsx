@@ -173,13 +173,15 @@ export function IncidentFeed() {
         <div className={styles.title}>🔴 Incident Feed</div>
         <div className={styles.status}>
           <div className={`${styles.statusDot} ${connected ? 'connected' : ''}`}></div>
-          <span>{connected ? 'Live' : 'Disconnected'}</span>
+          <span>{connected ? '🟢 Live' : '🔴 Offline'}</span>
         </div>
       </div>
 
       {incidents.length === 0 ? (
         <div className={styles.empty}>
-          {connected ? 'Waiting for incidents...' : 'Not connected to incident stream'}
+          {connected
+            ? '✅ No incidents. Waiting for changes...'
+            : '⚠️ Not connected to incident stream. Attempting to reconnect...'}
         </div>
       ) : (
         <div className={styles.feed}>
@@ -187,6 +189,7 @@ export function IncidentFeed() {
             <div
               key={`${item.id}-${item.timestamp}`}
               className={`${styles.feedItem} ${item.severity}`}
+              title={item.payload?.description}
             >
               <div className={styles.feedItemTitle}>
                 {item.type === 'created' && '✨ New: '}
@@ -196,6 +199,7 @@ export function IncidentFeed() {
               </div>
               <div className={styles.feedItemDetails}>
                 {item.severity && `Severity: ${item.severity}`}
+                {item.payload?.service && ` · Service: ${item.payload.service}`}
               </div>
               <div className={styles.timestamp}>{formatTime(item.timestamp)}</div>
             </div>

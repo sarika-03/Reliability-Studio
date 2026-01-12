@@ -1,14 +1,38 @@
 server:
   http_listen_port: 3200
+  log_level: info
 
 distributor:
   receivers:
     otlp:
       protocols:
         grpc:
+          endpoint: 0.0.0.0:4317
+        http:
+          endpoint: 0.0.0.0:4318
+
+ingester:
+  max_block_duration: 5m
+
+compactor:
+  compaction:
+    compacted_block_retention: 10m
 
 storage:
   trace:
     backend: local
     local:
       path: /tmp/tempo
+    wal:
+      path: /tmp/tempo/wal
+
+metrics_generator:
+  # Enable metrics generation from traces for better observability
+  storage:
+    path: /tmp/tempo/metrics-generator
+
+querier:
+  max_concurrent_queries: 10
+
+
+
