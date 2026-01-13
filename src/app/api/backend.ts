@@ -1,4 +1,4 @@
-const API_BASE = "http://reliability-backend:9000/api";
+const API_BASE = import.meta.env.VITE_BACKEND_URL || "http://localhost:9000/api";
 
 import { retry, isRetryableError } from '../../utils/retry-logic';
 import { circuitBreakerManager } from '../../utils/circuit-breaker';
@@ -97,6 +97,9 @@ export function setTokenExpiredCallback(callback: () => void) {
   onTokenExpired = callback;
 }
 
+// Import mock data for development
+import { mockData } from './mock-data';
+
 async function apiFetch<T>(endpoint: string, options: FetchOptions = {}): Promise<T> {
   const { body, serviceName = 'backend-api', ...customConfig } = options;
   const traceId = generateTraceId();
@@ -125,6 +128,12 @@ async function apiFetch<T>(endpoint: string, options: FetchOptions = {}): Promis
 
   // Log request
   console.log(`[API] ${method} ${endpoint} (trace: ${traceId})`);
+
+  // Check if we should use mock data (development without backend)
+  if (import.meta.env.DEV && import.meta.env.VITE_USE_MOCK_DATA === 'true') {
+    console.log(`[API] Using mock data for ${endpoint}`);
+    return mockData[endpoint as keyof typeof mockData] as T;
+  }
 
   // Use retry logic with circuit breaker
   return retry(
@@ -181,10 +190,10 @@ async function apiFetch<T>(endpoint: string, options: FetchOptions = {}): Promis
       }
 
       const responseData = await response.json();
-      const duration = Math.round(performance.now() - startTime);
-      
+      const totalDuration = Math.round(performance.now() - startTime);
+
       // Log successful request
-      console.log(`[API] ✓ ${method} ${endpoint} (${duration}ms, trace: ${traceId})`);
+      console.log(`[API] ✓ ${method} ${endpoint} (${totalDuration}ms, trace: ${traceId})`);
 
       return responseData;
     },

@@ -1,0 +1,20 @@
+{
+  "type": "panel",
+  "name": "Reliability Studio",
+  "id": "sarika-reliability-studio-panel",
+  "info": {
+    "description": "Custom reliability engineering visualization panel",
+    "author": {
+      "name": "Sarika"
+    },
+    "keywords": ["reliability", "engineering", "analysis"],
+    "version": "1.0.0",
+    "updated": "2026-01-13"
+  },
+  "includes": [],
+  "dependencies": {
+  "grafanaVersion": ">=10.0.0",
+  "plugins": []
+}
+}
+

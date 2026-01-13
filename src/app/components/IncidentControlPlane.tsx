@@ -325,11 +325,15 @@ export const IncidentControlPlane: React.FC<IncidentControlPlaneProps> = ({
                 </div>
               ))
             ) : (
-              analysis.correlations.slice(0, 5).map((corr: any) => (
-                <div key={corr.id} style={{ fontSize: '11px', color: theme.textMuted, marginBottom: '4px' }}>
-                  {corr.type}: {corr.source_id} ({(corr.confidence_score * 100).toFixed(0)}% confidence)
-                </div>
-              ))
+              analysis.correlations && analysis.correlations.length > 0 ? (
+                analysis.correlations.slice(0, 5).map((corr: any) => (
+                  <div key={corr.id} style={{ fontSize: '11px', color: theme.textMuted, marginBottom: '4px' }}>
+                    {corr.type}: {corr.source_id} ({(corr.confidence_score * 100).toFixed(0)}% confidence)
+                  </div>
+                ))
+              ) : (
+                <div style={{ fontSize: '11px', color: theme.textMuted }}>No signals available</div>
+              )
             )}
           </div>
         )}

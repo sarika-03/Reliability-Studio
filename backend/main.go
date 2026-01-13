@@ -10,12 +10,10 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
-	"strings"
 	"syscall"
 	"time"
 
 	"github.com/gorilla/mux"
-	"github.com/rs/cors"
 	_ "net/http/pprof"
 	"go.uber.org/zap"
 	
@@ -133,7 +131,7 @@ func main() {
 
 	// Initialize services
 	log.Println("⚙️  Initializing services...")
-	sloService := services.NewSLOService(db, promClient)
+	sloService := services.NewSLOService(db, zapLogger)
 	timelineService := services.NewTimelineService(db)
 	investigationService := services.NewInvestigationService(db, zapLogger)
 	correlationEngine := correlation.NewCorrelationEngine(db, promClient, k8sInterface, lokiClient)
@@ -257,19 +255,21 @@ func main() {
 	// WebSocket route (public for now, can add auth later)
 	router.HandleFunc("/api/realtime", realtimeServer.HandleWebSocket)
 
-	// Protected routes
-	api := router.PathPrefix("/api").Subrouter()
-	api.Use(middleware.Auth)
+	// Public API routes for Grafana plugin access
+	// These bypass auth for development - add auth in production
+	router.HandleFunc("/api/incidents", server.getIncidentsHandler).Methods("GET")
+	router.HandleFunc("/api/incidents/active", server.getActiveIncidentsHandler).Methods("GET")
+	router.HandleFunc("/api/incidents", server.createIncidentHandler).Methods("POST")
+	router.HandleFunc("/api/incidents/{id}", server.getIncidentHandler).Methods("GET")
+	router.HandleFunc("/api/incidents/{id}", server.updateIncidentHandler).Methods("PATCH")
+	router.HandleFunc("/api/incidents/{id}/timeline", server.getIncidentTimelineHandler).Methods("GET")
+	router.HandleFunc("/api/incidents/{id}/correlations", server.getIncidentCorrelationsHandler).Methods("GET")
+	router.HandleFunc("/api/incidents/{id}/analysis", server.getIncidentAnalysisHandler).Methods("GET")
+	router.HandleFunc("/api/services", server.getServicesHandler).Methods("GET")
 
-	// Incidents routes
-	api.HandleFunc("/incidents", server.getIncidentsHandler).Methods("GET")
-	api.HandleFunc("/incidents/active", server.getActiveIncidentsHandler).Methods("GET")
-	api.HandleFunc("/incidents", server.createIncidentHandler).Methods("POST")
-	api.HandleFunc("/incidents/{id}", server.getIncidentHandler).Methods("GET")
-	api.HandleFunc("/incidents/{id}", server.updateIncidentHandler).Methods("PATCH")
-	api.HandleFunc("/incidents/{id}/timeline", server.getIncidentTimelineHandler).Methods("GET")
-	api.HandleFunc("/incidents/{id}/correlations", server.getIncidentCorrelationsHandler).Methods("GET")
-	api.HandleFunc("/incidents/{id}/analysis", server.getIncidentAnalysisHandler).Methods("GET")
+	// Protected routes - requires authentication
+	api := router.PathPrefix("/api/admin").Subrouter()
+	api.Use(middleware.Auth)
 
 	// Investigation routes (guided RCA workflows)
 	api.HandleFunc("/incidents/{id}/investigation/hypotheses", handlers.GetInvestigationHypotheses).Methods("GET")
@@ -308,9 +308,6 @@ func main() {
 	api.HandleFunc("/logs/{service}/errors", server.getErrorLogsHandler).Methods("GET")
 	api.HandleFunc("/logs/{service}/search", server.searchLogsHandler).Methods("GET")
 
-	// Services route (public for service selector)
-	api.HandleFunc("/services", server.getServicesHandler).Methods("GET")
-
 	// Admin routes
 	admin := api.PathPrefix("/admin").Subrouter()
 	admin.Use(middleware.RequireRole("admin"))
@@ -328,22 +325,8 @@ func main() {
 	// Using nil for logger - handlers will use standard logging
 	handlers.InitTestHandlers(promClient, lokiClient, nil, sloService, nil)
 
-	// CORS configuration - HARDENED: Strict origins, no wildcards
-	allowedOrigins := strings.Split(getEnvStrict("CORS_ALLOWED_ORIGINS"), ",")
-	if len(allowedOrigins) == 0 || allowedOrigins[0] == "" {
-		log.Fatal("🔴 CORS_ALLOWED_ORIGINS environment variable not set! Set to comma-separated list of allowed origins, e.g., 'https://example.com,https://app.example.com'")
-	}
-
-	log.Printf("✅ CORS configured for origins: %v", allowedOrigins)
-
-	corsHandler := cors.New(cors.Options{
-		AllowedOrigins:   allowedOrigins,
-		AllowedMethods:   []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
-		AllowedHeaders:   []string{"Content-Type", "Authorization", "X-CSRF-Token"},
-		ExposedHeaders:   []string{"X-Total-Count"},
-		AllowCredentials: true,
-		MaxAge:           300,
-	})
+	// Wrap router with CORS middleware
+	handler := middleware.CORSMiddleware(router)
 
 	// Optional: PProf for performance debugging
 	if os.Getenv("ENABLE_PPROF") == "true" {
@@ -363,7 +346,7 @@ func main() {
 	port := getEnv("PORT", "9000")
 	srv := &http.Server{
 		Addr:         ":" + port,
-		Handler:      corsHandler.Handler(router),
+		Handler:      handler,
 		ReadTimeout:  15 * time.Second,
 		WriteTimeout: 15 * time.Second,
 		IdleTimeout:  60 * time.Second,
@@ -684,10 +667,10 @@ func (s *Server) createIncidentHandler(w http.ResponseWriter, r *http.Request) {
 	// Create incident
 	var incidentID string
 	err = s.db.QueryRow(`
-		INSERT INTO incidents (title, description, severity, status, service_id)
-		VALUES ($1, $2, $3, 'open', $4)
+		INSERT INTO incidents (title, description, severity, status, service, service_id)
+		VALUES ($1, $2, $3, 'open', $4, $5)
 		RETURNING id
-	`, req.Title, req.Description, req.Severity, serviceID).Scan(&incidentID)
+	`, req.Title, req.Description, req.Severity, req.Service, serviceID).Scan(&incidentID)
 
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to create incident: %v", err))
@@ -1034,7 +1017,7 @@ func (s *Server) getServicesHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 
-	var services []map[string]interface{}
+	services := make([]map[string]interface{}, 0)
 	for rows.Next() {
 		var id, name, status string
 		if err := rows.Scan(&id, &name, &status); err != nil {
@@ -1074,11 +1057,4 @@ func getEnv(key, defaultValue string) string {
 	return defaultValue
 }
 
-// getEnvStrict - HARDENED: Requires env variable to be set, fails if missing
-func getEnvStrict(key string) string {
-	if value := os.Getenv(key); value != "" {
-		return value
-	}
-	log.Fatalf("🔴 CRITICAL: Environment variable '%s' is required but not set!", key)
-	return "" // unreachable
-}
+

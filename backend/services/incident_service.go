@@ -9,6 +9,7 @@ import (
 	"github.com/sarika-03/Reliability-Studio/models"
 	"go.uber.org/zap"
 	"time"
+	"fmt"
 )
 
 type IncidentService struct {
@@ -100,7 +101,7 @@ func (s *IncidentService) Create(ctx context.Context, req models.CreateIncidentR
 	)
 	if err != nil {
 		s.logger.Error("Failed to create incident", zap.Error(err))
-		return nil, err
+		return nil, fmt.Errorf("failed to create incident: %w", err)
 	}
 
 	// Link services
@@ -121,7 +122,7 @@ func (s *IncidentService) Create(ctx context.Context, req models.CreateIncidentR
 	}
 
 	if err := tx.Commit(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to create incident (commit): %w", err)
 	}
 
 	s.logger.Info("Created incident", zap.String("id", incident.ID.String()))

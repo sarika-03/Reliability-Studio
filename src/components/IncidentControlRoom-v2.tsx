@@ -439,7 +439,7 @@ export const IncidentControlRoom: React.FC = () => {
                 ) : (
                     <>
                         <div className={styles.incidentList}>
-                            {incidents.map(incident => (
+                            {incidentsList.map(incident => (
                                 <div
                                     key={incident.id}
                                     className={`${styles.incidentItem} ${
@@ -469,7 +469,7 @@ export const IncidentControlRoom: React.FC = () => {
                             <span>
                                 <span className={styles.pollIndicator} /> Live polling
                             </span>
-                            <span>{incidents.length} active</span>
+                            <span>{incidentsList.length} active</span>
                         </div>
                     </>
                 )}
@@ -524,14 +524,14 @@ export const IncidentControlRoom: React.FC = () => {
                             <div style={{ width: '30%', borderRight: `1px solid ${theme.border}`, overflow: 'auto' }}>
                                 <div style={{ padding: '20px' }}>
                                     <h4 style={{ margin: '0 0 12px 0', fontSize: '14px', fontWeight: 600, textTransform: 'uppercase' }}>
-                                        📋 Timeline ({timelineEvents.length} events)
+                                        📋 Timeline ({(timelineEvents || []).length} events)
                                     </h4>
                                     {timelineState === 'loading' ? (
                                         <div style={{ textAlign: 'center', padding: '20px' }}>
                                             <div className={styles.loadingSpinner} style={{ margin: '0 auto' }} />
                                         </div>
                                     ) : (
-                                        <Timeline events={timelineEvents} />
+                                        <Timeline events={timelineEvents || []} />
                                     )}
                                 </div>
                             </div>
@@ -541,7 +541,7 @@ export const IncidentControlRoom: React.FC = () => {
                                     <h4 style={{ margin: '0 0 12px 0', fontSize: '14px', fontWeight: 600, textTransform: 'uppercase' }}>
                                         📊 Telemetry & Correlation
                                     </h4>
-                                    <TelemetryTabs incidentId={selectedIncident.id} />
+                                    {selectedIncident && <TelemetryTabs incidentId={selectedIncident.id} service={selectedIncident.service_id} />}
                                 </div>
                             </div>
                         </div>

@@ -1,5 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { css, keyframes } from '@emotion/css';
+import { useStyles2, useTheme2 } from '@grafana/ui';
+import { GrafanaTheme2 } from '@grafana/data';
 import { backendAPI } from '../app/api/backend';
 import { useRealtime } from '../app/hooks/useRealtime';
 import { Timeline } from './Timeline';
@@ -16,41 +18,27 @@ const pulse = keyframes`
   100% { box-shadow: 0 0 0 0 rgba(244, 67, 54, 0); }
 `;
 
-const theme = {
-    bg: '#0b0c10',
-    surface: '#1a1d23',
-    surfaceLight: '#252932',
-    border: '#2d333d',
-    accent: '#00d2ff',
-    accentGradient: 'linear-gradient(135deg, #00d2ff 0%, #3a7bd5 100%)',
-    critical: '#f44336',
-    high: '#ff9800',
-    medium: '#ffeb3b',
-    low: '#4caf50',
-    text: '#e6e8eb',
-    textMuted: '#9fa6b2',
-};
-
-const styles = {
-    container: css`
-    display: flex;
-    height: calc(100vh - 100px);
-    background: ${theme.bg};
-    color: ${theme.text};
-    font-family: 'Inter', system-ui, -apple-system, sans-serif;
-    overflow: hidden;
-    animation: ${fadeIn} 0.5s ease-out;
-  `,
-    sidebar: css`
+const getStyles = (theme: GrafanaTheme2) => {
+    return {
+        container: css`
+      display: flex;
+      height: 100%;
+      background: ${theme.colors.background.primary};
+      color: ${theme.colors.text.primary};
+      font-family: ${theme.typography.fontFamily};
+      overflow: hidden;
+      animation: ${fadeIn} 0.5s ease-out;
+    `,
+        sidebar: css`
     width: 320px;
-    border-right: 1px solid ${theme.border};
+    border-right: 1px solid ${theme.colors.border.weak};
     display: flex;
     flex-direction: column;
-    background: ${theme.surface};
+    background: ${theme.colors.background.secondary};
   `,
-    sidebarHeader: css`
+        sidebarHeader: css`
     padding: 20px;
-    border-bottom: 1px solid ${theme.border};
+    border-bottom: 1px solid ${theme.colors.border.weak};
     font-size: 18px;
     font-weight: 700;
     letter-spacing: -0.5px;
@@ -58,7 +46,7 @@ const styles = {
     align-items: center;
     gap: 10px;
   `,
-    incidentList: css`
+        incidentList: css`
     flex: 1;
     overflow-y: auto;
     padding: 10px;
@@ -66,23 +54,23 @@ const styles = {
       width: 4px;
     }
     &::-webkit-scrollbar-thumb {
-      background: ${theme.border};
+      background: ${theme.colors.border.weak};
       border-radius: 2px;
     }
   `,
-    incidentCard: (active: boolean, severity: string) => css`
+        incidentCard: (active: boolean, severity: string) => css`
     padding: 16px;
     border-radius: 8px;
     margin-bottom: 10px;
-    background: ${active ? theme.surfaceLight : 'transparent'};
-    border: 1px solid ${active ? theme.accent : theme.border};
+    background: ${active ? theme.colors.action.hover : 'transparent'};
+    border: 1px solid ${active ? theme.colors.primary.main : theme.colors.border.weak};
     cursor: pointer;
     transition: all 0.2s ease;
     position: relative;
     overflow: hidden;
 
     &:hover {
-      background: ${theme.surfaceLight};
+      background: ${theme.colors.action.hover};
       transform: translateX(4px);
     }
 
@@ -93,12 +81,12 @@ const styles = {
       top: 0;
       bottom: 0;
       width: 4px;
-      background: ${severity === 'critical' ? theme.critical :
-            severity === 'high' ? theme.high :
-                severity === 'medium' ? theme.medium : theme.low};
+      background: ${severity === 'critical' ? theme.colors.error.main :
+                severity === 'high' ? theme.colors.warning.main :
+                    severity === 'medium' ? theme.colors.info.main : theme.colors.secondary.main};
     }
   `,
-    cardTitle: css`
+        cardTitle: css`
     font-size: 14px;
     font-weight: 600;
     margin-bottom: 6px;
@@ -106,37 +94,37 @@ const styles = {
     text-overflow: ellipsis;
     white-space: nowrap;
   `,
-    cardMeta: css`
+        cardMeta: css`
     display: flex;
     justify-content: space-between;
     font-size: 11px;
-    color: ${theme.textMuted};
+    color: ${theme.colors.text.secondary};
   `,
-    mainContent: css`
+        mainContent: css`
     flex: 1;
     display: flex;
     flex-direction: column;
     overflow: hidden;
   `,
-    header: css`
+        header: css`
     padding: 24px;
-    border-bottom: 1px solid ${theme.border};
-    background: ${theme.surface};
+    border-bottom: 1px solid ${theme.colors.border.weak};
+    background: ${theme.colors.background.secondary};
     display: flex;
     justify-content: space-between;
     align-items: center;
   `,
-    headerInfo: css`
+        headerInfo: css`
     display: flex;
     flex-direction: column;
     gap: 4px;
   `,
-    headerTitle: css`
+        headerTitle: css`
     font-size: 24px;
     font-weight: 800;
     letter-spacing: -1px;
   `,
-    badge: (color: string) => css`
+        badge: (color: string) => css`
     padding: 4px 10px;
     border-radius: 12px;
     font-size: 11px;
@@ -146,58 +134,61 @@ const styles = {
     color: ${color};
     border: 1px solid ${color}40;
   `,
-    actions: css`
+        actions: css`
     display: flex;
     gap: 12px;
   `,
-    button: (primary: boolean) => css`
+        button: (primary: boolean) => css`
     padding: 10px 20px;
     border-radius: 6px;
     font-size: 13px;
     font-weight: 600;
     cursor: pointer;
     transition: all 0.2s;
-    background: ${primary ? theme.accentGradient : 'transparent'};
-    border: 1px solid ${primary ? 'transparent' : theme.border};
-    color: ${theme.text};
+    background: ${primary ? theme.colors.primary.main : 'transparent'};
+    border: 1px solid ${primary ? 'transparent' : theme.colors.border.weak};
+    color: ${theme.colors.text.primary};
 
     &:hover {
       transform: translateY(-2px);
       box-shadow: ${primary ? '0 4px 15px rgba(0, 210, 255, 0.3)' : 'none'};
-      background: ${primary ? theme.accentGradient : theme.surfaceLight};
+      background: ${primary ? theme.colors.primary.main : theme.colors.action.hover};
     }
   `,
-    contentGrid: css`
+        contentGrid: css`
     display: grid;
     grid-template-columns: 1fr 400px;
     flex: 1;
     overflow: hidden;
   `,
-    tabContainer: css`
-    border-left: 1px solid ${theme.border};
+        tabContainer: css`
+    border-left: 1px solid ${theme.colors.border.weak};
     display: flex;
     flex-direction: column;
     overflow: hidden;
   `,
-    emptyState: css`
+        emptyState: css`
     flex: 1;
     display: flex;
     flex-direction: column;
     align-items: center;
     justify-content: center;
-    color: ${theme.textMuted};
+    color: ${theme.colors.text.secondary};
     gap: 20px;
   `,
-    liveDot: css`
+        liveDot: css`
     width: 10px;
     height: 10px;
-    background: ${theme.critical};
+    background: ${theme.colors.error.main};
     border-radius: 50%;
     animation: ${pulse} 2s infinite;
   `,
+    };
 };
 
 export function IncidentControlRoom() {
+    const theme = useTheme2();
+    const styles = useStyles2(getStyles);
     const [incidents, setIncidents] = useState<any[]>([]);
     const [selectedIncident, setSelectedIncident] = useState<any>(null);
     const [timelineEvents, setTimelineEvents] = useState<any[]>([]);
@@ -223,7 +214,7 @@ export function IncidentControlRoom() {
         try {
             setServicesError(null);
             const data = await backendAPI.services.list();
-            const serviceNames = data.map((s: any) => s.name);
+            const serviceNames = (Array.isArray(data) ? data : []).map((s: any) => s.name);
             setServices(serviceNames);
 
             if (serviceNames.includes('payment-service') && !localStorage.getItem('selectedService')) {
@@ -249,13 +240,14 @@ export function IncidentControlRoom() {
             setIncidentsLoading(true);
             setError(null);
             const data = await backendAPI.incidents.list();
-            
+            const safeData = Array.isArray(data) ? data : [];
+
             const filteredData = selectedService
-                ? data.filter((inc: any) => inc.service === selectedService)
-                : data;
-            
+                ? safeData.filter((inc: any) => inc.service === selectedService)
+                : safeData;
+
             setIncidents(filteredData);
-            
+
             // Auto-select first incident if none selected
             if (filteredData.length > 0 && !selectedIncident) {
                 console.log('[IncidentControlRoom] Auto-selecting first incident:', filteredData[0].id);
@@ -282,10 +274,11 @@ export function IncidentControlRoom() {
             setSelectedIncident(incident);
             setTimelineLoading(true);
             setError(null);
-            
+
             const events = await backendAPI.incidents.getTimeline(incident.id);
-            console.log('[IncidentControlRoom] Loaded timeline events:', events.length);
-            setTimelineEvents(events);
+            const safeEvents = Array.isArray(events) ? events : [];
+            console.log('[IncidentControlRoom] Loaded timeline events:', safeEvents.length);
+            setTimelineEvents(safeEvents);
         } catch (err) {
             const errorMsg = err instanceof Error ? err.message : 'Failed to load timeline';
             console.error('[IncidentControlRoom] Failed to load timeline:', errorMsg);
@@ -327,7 +320,7 @@ export function IncidentControlRoom() {
                 prev.map(i => i.id === id ? { ...i, status: 'investigating' } : i)
             );
             if (selectedIncident?.id === id) {
-                setSelectedIncident(prev => ({ ...prev, status: 'investigating' }));
+                setSelectedIncident((prev: any) => ({ ...prev, status: 'investigating' }));
             }
         } catch (err) {
             const errorMsg = err instanceof Error ? err.message : 'Failed to acknowledge incident';
@@ -344,7 +337,7 @@ export function IncidentControlRoom() {
                 prev.map(i => i.id === id ? { ...i, status: 'resolved' } : i)
             );
             if (selectedIncident?.id === id) {
-                setSelectedIncident(prev => ({ ...prev, status: 'resolved' }));
+                setSelectedIncident((prev: any) => ({ ...prev, status: 'resolved' }));
             }
         } catch (err) {
             const errorMsg = err instanceof Error ? err.message : 'Failed to resolve incident';
@@ -363,10 +356,10 @@ export function IncidentControlRoom() {
                     </div>
                     <div className={styles.emptyState}>
                         <div style={{ fontSize: '14px', fontWeight: 500 }}>📊 Initializing Control Room</div>
-                        <div style={{ fontSize: '12px', marginTop: '8px', color: theme.textMuted }}>Loading services and incidents...</div>
+                        <div style={{ fontSize: '12px', marginTop: '8px', color: theme.colors.text.secondary }}>Loading services and incidents...</div>
                     </div>
                 </div>
-                <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: theme.textMuted }}>
+                <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: theme.colors.text.secondary }}>
                     <div style={{ textAlign: 'center' }}>
                         <div style={{ fontSize: '24px', marginBottom: '12px' }}>⏳</div>
                         <div>Initializing</div>
@@ -398,8 +391,8 @@ export function IncidentControlRoom() {
                     </div>
                 )}
 
-                <div style={{ padding: '10px 20px', borderBottom: `1px solid ${theme.border}` }}>
-                    <label style={{ fontSize: '11px', color: theme.textMuted, marginBottom: '6px', display: 'block' }}>
+                <div style={{ padding: '10px 20px', borderBottom: `1px solid ${theme.colors.border.weak}` }}>
+                    <label style={{ fontSize: '11px', color: theme.colors.text.secondary, marginBottom: '6px', display: 'block' }}>
                         Service Filter
                     </label>
                     <select
@@ -408,10 +401,10 @@ export function IncidentControlRoom() {
                         style={{
                             width: '100%',
                             padding: '8px 12px',
-                            background: theme.surfaceLight,
-                            border: `1px solid ${theme.border}`,
+                            background: theme.colors.action.hover,
+                            border: `1px solid ${theme.colors.border.weak}`,
                             borderRadius: '6px',
-                            color: theme.text,
+                            color: theme.colors.text.primary,
                             fontSize: '13px',
                             fontWeight: 600,
                             cursor: 'pointer',
@@ -429,7 +422,7 @@ export function IncidentControlRoom() {
                     {incidentsLoading ? (
                         <div className={styles.emptyState}>
                             <div style={{ fontSize: '14px', fontWeight: 500 }}>📋 Loading incidents</div>
-                            <div style={{ fontSize: '12px', marginTop: '8px', color: theme.textMuted }}>Fetching from backend...</div>
+                            <div style={{ fontSize: '12px', marginTop: '8px', color: theme.colors.text.secondary }}>Fetching from backend...</div>
                         </div>
                     ) : error ? (
                         <div style={{
@@ -460,7 +453,7 @@ export function IncidentControlRoom() {
                     ) : incidents.length === 0 ? (
                         <div className={styles.emptyState}>
                             <div style={{ fontSize: '14px', fontWeight: 500 }}>✅ No active incidents</div>
-                            <div style={{ fontSize: '12px', marginTop: '8px', color: theme.textMuted }}>All systems healthy</div>
+                            <div style={{ fontSize: '12px', marginTop: '8px', color: theme.colors.text.secondary }}>All systems healthy</div>
                         </div>
                     ) : (
                         incidents.map((incident) => (
@@ -515,17 +508,17 @@ export function IncidentControlRoom() {
                             <div className={styles.headerInfo}>
                                 <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '8px' }}>
                                     <div className={styles.badge(
-                                        selectedIncident.severity === 'critical' ? theme.critical :
-                                            selectedIncident.severity === 'high' ? theme.high : theme.medium
+                                        selectedIncident.severity === 'critical' ? theme.colors.error.main :
+                                            selectedIncident.severity === 'high' ? theme.colors.warning.main : theme.colors.info.main
                                     )}>
                                         {selectedIncident.severity}
                                     </div>
-                                    <div className={styles.badge(theme.accent)}>
+                                    <div className={styles.badge(theme.colors.primary.main)}>
                                         {selectedIncident.status}
                                     </div>
                                 </div>
                                 <div className={styles.headerTitle}>{selectedIncident.title}</div>
-                                <div style={{ color: theme.textMuted, fontSize: '14px' }}>
+                                <div style={{ color: theme.colors.text.secondary, fontSize: '14px' }}>
                                     Detected for <strong>{selectedIncident.service}</strong> at {new Date(selectedIncident.started_at).toLocaleString()}
                                 </div>
                             </div>
@@ -557,7 +550,7 @@ export function IncidentControlRoom() {
                                     flexDirection: 'column',
                                     alignItems: 'center',
                                     justifyContent: 'center',
-                                    color: theme.textMuted,
+                                    color: theme.colors.text.secondary,
                                     gap: '12px',
                                 }}>
                                     <div style={{ fontSize: '24px' }}>⏳</div>
@@ -580,7 +573,7 @@ export function IncidentControlRoom() {
                     <div className={styles.emptyState}>
                         <div style={{ fontSize: '24px', marginBottom: '12px' }}>👋</div>
                         <h2 style={{ margin: '0 0 8px 0' }}>Select an incident to investigate</h2>
-                        <p style={{ margin: '0', color: theme.textMuted }}>
+                        <p style={{ margin: '0', color: theme.colors.text.secondary }}>
                             {incidents.length > 0
                                 ? 'Click on an incident in the left sidebar to view details, timeline, and telemetry.'
                                 : 'All systems are healthy. No active incidents detected.'}

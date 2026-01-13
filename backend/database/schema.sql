@@ -4,7 +4,7 @@
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 
 -- Services (Service Catalog)
-CREATE TABLE services (
+CREATE TABLE IF NOT EXISTS services (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     name VARCHAR(255) NOT NULL UNIQUE,
     description TEXT,
@@ -18,7 +18,7 @@ CREATE TABLE services (
 );
 
 -- SLOs
-CREATE TABLE slos (
+CREATE TABLE IF NOT EXISTS slos (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     service_id UUID REFERENCES services(id) ON DELETE CASCADE,
     name VARCHAR(255) NOT NULL,
@@ -35,7 +35,7 @@ CREATE TABLE slos (
 );
 
 -- SLO History (for tracking over time)
-CREATE TABLE slo_history (
+CREATE TABLE IF NOT EXISTS slo_history (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     slo_id UUID REFERENCES slos(id) ON DELETE CASCADE,
     timestamp TIMESTAMP NOT NULL,
@@ -46,7 +46,7 @@ CREATE TABLE slo_history (
 );
 
 -- Incidents
-CREATE TABLE incidents (
+CREATE TABLE IF NOT EXISTS incidents (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     title VARCHAR(500) NOT NULL,
     description TEXT,
@@ -69,7 +69,7 @@ CREATE TABLE incidents (
 );
 
 -- Incident Services (many-to-many)
-CREATE TABLE incident_services (
+CREATE TABLE IF NOT EXISTS incident_services (
     incident_id UUID REFERENCES incidents(id) ON DELETE CASCADE,
     service_id UUID REFERENCES services(id) ON DELETE CASCADE,
     impact_level VARCHAR(50) CHECK (impact_level IN ('primary', 'secondary', 'tertiary')),
@@ -78,7 +78,7 @@ CREATE TABLE incident_services (
 );
 
 -- Timeline Events
-CREATE TABLE timeline_events (
+CREATE TABLE IF NOT EXISTS timeline_events (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     incident_id UUID REFERENCES incidents(id) ON DELETE CASCADE,
     event_type VARCHAR(100) NOT NULL,
@@ -92,7 +92,7 @@ CREATE TABLE timeline_events (
 );
 
 -- Tasks
-CREATE TABLE incident_tasks (
+CREATE TABLE IF NOT EXISTS incident_tasks (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     incident_id UUID REFERENCES incidents(id) ON DELETE CASCADE,
     title VARCHAR(500) NOT NULL,
@@ -106,7 +106,7 @@ CREATE TABLE incident_tasks (
 );
 
 -- Correlation Rules (for automated incident detection)
-CREATE TABLE correlation_rules (
+CREATE TABLE IF NOT EXISTS correlation_rules (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     name VARCHAR(255) NOT NULL UNIQUE,
     description TEXT,
@@ -122,7 +122,7 @@ CREATE TABLE correlation_rules (
 );
 
 -- Alerts (from Prometheus/Alertmanager)
-CREATE TABLE alerts (
+CREATE TABLE IF NOT EXISTS alerts (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     alert_name VARCHAR(255) NOT NULL,
     fingerprint VARCHAR(255) UNIQUE,
@@ -138,7 +138,7 @@ CREATE TABLE alerts (
 );
 
 -- Metrics Cache (for faster dashboard loading)
-CREATE TABLE metrics_cache (
+CREATE TABLE IF NOT EXISTS metrics_cache (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     metric_key VARCHAR(255) NOT NULL,
     service_id UUID REFERENCES services(id) ON DELETE CASCADE,
@@ -150,7 +150,7 @@ CREATE TABLE metrics_cache (
 );
 
 -- Correlations (for incident correlation engine)
-CREATE TABLE correlations (
+CREATE TABLE IF NOT EXISTS correlations (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     incident_id UUID REFERENCES incidents(id) ON DELETE CASCADE,
     correlation_type VARCHAR(50) NOT NULL,
@@ -162,18 +162,18 @@ CREATE TABLE correlations (
 );
 
 -- Indexes for performance
-CREATE INDEX idx_incidents_status ON incidents(status);
-CREATE INDEX idx_incidents_severity ON incidents(severity);
-CREATE INDEX idx_incidents_started_at ON incidents(started_at DESC);
-CREATE INDEX idx_timeline_incident_timestamp ON timeline_events(incident_id, timestamp DESC);
-CREATE INDEX idx_slos_service ON slos(service_id);
-CREATE INDEX idx_slo_history_slo_timestamp ON slo_history(slo_id, timestamp DESC);
-CREATE INDEX idx_alerts_fingerprint ON alerts(fingerprint);
-CREATE INDEX idx_alerts_status ON alerts(status);
-CREATE INDEX idx_incident_services_service ON incident_services(service_id);
-CREATE INDEX idx_metrics_cache_key_time ON metrics_cache(metric_key, timestamp DESC);
-CREATE INDEX idx_correlations_created_at ON correlations(created_at DESC);
-CREATE INDEX idx_correlations_incident_id ON correlations(incident_id);
+CREATE INDEX IF NOT EXISTS idx_incidents_status ON incidents(status);
+CREATE INDEX IF NOT EXISTS idx_incidents_severity ON incidents(severity);
+CREATE INDEX IF NOT EXISTS idx_incidents_started_at ON incidents(started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_timeline_incident_timestamp ON timeline_events(incident_id, timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_slos_service ON slos(service_id);
+CREATE INDEX IF NOT EXISTS idx_slo_history_slo_timestamp ON slo_history(slo_id, timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_alerts_fingerprint ON alerts(fingerprint);
+CREATE INDEX IF NOT EXISTS idx_alerts_status ON alerts(status);
+CREATE INDEX IF NOT EXISTS idx_incident_services_service ON incident_services(service_id);
+CREATE INDEX IF NOT EXISTS idx_metrics_cache_key_time ON metrics_cache(metric_key, timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_correlations_created_at ON correlations(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_correlations_incident_id ON correlations(incident_id);
 
 -- Trigger to update updated_at timestamp
 CREATE OR REPLACE FUNCTION update_updated_at_column()
@@ -184,8 +184,11 @@ BEGIN
 END;
 $$ language 'plpgsql';
 
+DROP TRIGGER IF EXISTS update_services_updated_at ON services;
 CREATE TRIGGER update_services_updated_at BEFORE UPDATE ON services FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+DROP TRIGGER IF EXISTS update_slos_updated_at ON slos;
 CREATE TRIGGER update_slos_updated_at BEFORE UPDATE ON slos FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+DROP TRIGGER IF EXISTS update_incidents_updated_at ON incidents;
 CREATE TRIGGER update_incidents_updated_at BEFORE UPDATE ON incidents FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
 
 -- Trigger to calculate MTTR when incident is resolved
@@ -205,6 +208,7 @@ BEGIN
 END;
 $$ language 'plpgsql';
 
+DROP TRIGGER IF EXISTS calculate_metrics_on_resolve ON incidents;
 CREATE TRIGGER calculate_metrics_on_resolve BEFORE UPDATE ON incidents FOR EACH ROW EXECUTE FUNCTION calculate_incident_metrics();
 
 -- Insert sample data
@@ -228,7 +232,7 @@ INSERT INTO correlation_rules (name, description, rule_type, query, threshold_va
 ON CONFLICT (name) DO NOTHING;
 
 -- Investigation Hypotheses (for RCA workflows)
-CREATE TABLE investigation_hypotheses (
+CREATE TABLE IF NOT EXISTS investigation_hypotheses (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     incident_id UUID REFERENCES incidents(id) ON DELETE CASCADE,
     title VARCHAR(500) NOT NULL,
@@ -240,7 +244,7 @@ CREATE TABLE investigation_hypotheses (
 );
 
 -- Investigation Steps (for guided workflows)
-CREATE TABLE investigation_steps (
+CREATE TABLE IF NOT EXISTS investigation_steps (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     incident_id UUID REFERENCES incidents(id) ON DELETE CASCADE,
     hypothesis_id UUID REFERENCES investigation_hypotheses(id) ON DELETE SET NULL,
@@ -255,6 +259,6 @@ CREATE TABLE investigation_steps (
 );
 
 -- Create indexes for investigations
-CREATE INDEX idx_hypotheses_incident ON investigation_hypotheses(incident_id);
-CREATE INDEX idx_steps_incident ON investigation_steps(incident_id);
-CREATE INDEX idx_steps_status ON investigation_steps(status);
+CREATE INDEX IF NOT EXISTS idx_hypotheses_incident ON investigation_hypotheses(incident_id);
+CREATE INDEX IF NOT EXISTS idx_steps_incident ON investigation_steps(incident_id);
+CREATE INDEX IF NOT EXISTS idx_steps_status ON investigation_steps(status);

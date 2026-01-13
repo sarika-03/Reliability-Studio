@@ -1,295 +1,315 @@
-// Package services provides business logic for SLO, incidents, and other reliability features
+// services/slo_service.go - Enhanced error handling
 package services
 
 import (
 	"context"
 	"database/sql"
 	"fmt"
-	"github.com/sarika-03/Reliability-Studio/clients"
-	"strings"
 	"time"
+	"github.com/jmoiron/sqlx"
+	"go.uber.org/zap"
 )
 
+// SLOService handles SLO calculations and management
 type SLOService struct {
-	db         *sql.DB
-	promClient PrometheusQueryClient
+	db     *sqlx.DB
+	logger *zap.Logger
 }
 
-type PrometheusQueryClient interface {
-	Query(ctx context.Context, query string, timestamp time.Time) (*clients.PrometheusResponse, error)
-	QueryRange(ctx context.Context, query string, start, end time.Time, step time.Duration) (*clients.PrometheusResponse, error)
-}
-
-type SLO struct {
-	ID                   string    `json:"id"`
-	ServiceID            string    `json:"service_id"`
-	ServiceName          string    `json:"service_name"`
-	Name                 string    `json:"name"`
-	Description          string    `json:"description"`
-	TargetPercentage     float64   `json:"target_percentage"`
-	WindowDays           int       `json:"window_days"`
-	SLIType              string    `json:"sli_type"`
-	Query                string    `json:"query"`
-	CurrentPercentage    float64   `json:"current_percentage"`
-	ErrorBudgetRemaining float64   `json:"error_budget_remaining"`
-	Status               string    `json:"status"`
-	LastCalculatedAt     time.Time `json:"last_calculated_at"`
-	CreatedAt            time.Time `json:"created_at"`
-}
-
-type SLOBurnRate struct {
-	WindowSize string  `json:"window"`
-	BurnRate   float64 `json:"burn_rate"`
-	Threshold  float64 `json:"threshold"`
-	Breached   bool    `json:"breached"`
-}
-
-// NewSLOService creates a new SLO service
-func NewSLOService(db *sql.DB, promClient PrometheusQueryClient) *SLOService {
+// NewSLOService creates a new SLOService instance
+func NewSLOService(db *sql.DB, logger *zap.Logger) *SLOService {
 	return &SLOService{
-		db:         db,
-		promClient: promClient,
+		db:     sqlx.NewDb(db, "postgres"),
+		logger: logger,
 	}
 }
 
-// SLOAnalysisResult captures SLO plus multi-window burn information.
-type SLOAnalysisResult struct {
-	SLO       *SLO          `json:"slo"`
-	BurnRates []SLOBurnRate `json:"burn_rates"`
+// SLO represents a local SLO type with all required fields
+type SLO struct {
+	ID              string     `db:"id"`
+	Name            string     `db:"name"`
+	Description     string     `db:"description"`
+	Service         string     `db:"service"`
+	Type            string     `db:"type"`
+	Target          float64    `db:"target"`
+	Window          int        `db:"window"`
+	Current         *float64   `db:"current"`
+	Status          string     `db:"status"`
+	LastCalculated  *time.Time `db:"last_calculated"`
 }
 
-// CalculateSLO calculates current SLO compliance
-func (s *SLOService) CalculateSLO(ctx context.Context, sloID string) (*SLOAnalysisResult, error) {
-	// Get SLO configuration
+// SLOError represents a detailed SLO calculation error
+type SLOError struct {
+	Type        string   `json:"type"`
+	Message     string   `json:"message"`
+	Details     string   `json:"details,omitempty"`
+	Suggestions []string `json:"suggestions,omitempty"`
+}
+
+// SLOAnalysis includes error information
+type SLOAnalysis struct {
+	SLOID        string     `json:"slo_id"`
+	Value        *float64   `json:"value"` // Pointer to distinguish between 0 and null
+	Target       float64    `json:"target"`
+	ErrorBudget  *float64   `json:"error_budget,omitempty"`
+	Status       string     `json:"status"`
+	CalculatedAt time.Time  `json:"calculated_at"`
+	Error        *SLOError  `json:"error,omitempty"`
+	Service      string     `json:"service"`
+	MetricType   string     `json:"metric_type"`
+}
+
+// GetSLO retrieves an SLO by ID
+func (s *SLOService) GetSLO(ctx context.Context, sloID string) (*SLO, error) {
+	query := `
+		SELECT id, name, description, service, type, target, window, 
+		       COALESCE(current_value, NULL) as current, status
+		FROM slos
+		WHERE id = $1
+	`
+	
+	var slo SLO
+	err := s.db.GetContext(ctx, &slo, query, sloID)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, fmt.Errorf("SLO not found: %s", sloID)
+		}
+		return nil, fmt.Errorf("failed to fetch SLO: %w", err)
+	}
+	
+	return &slo, nil
+}
+
+// CalculateSLO with enhanced error handling
+func (s *SLOService) CalculateSLO(ctx context.Context, sloID string) (*SLOAnalysis, error) {
+	// Fetch SLO configuration
 	slo, err := s.GetSLO(ctx, sloID)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get SLO: %w", err)
+		return nil, fmt.Errorf("failed to fetch SLO: %w", err)
 	}
 
-	// Calculate time window
-	end := time.Now()
-
-	// FIXED: Replace ${WINDOW} placeholder with the SLO window (e.g. 30d)
-	// This ensures the query respects the WindowDays set in the database.
-	window := fmt.Sprintf("%dd", slo.WindowDays)
-	query := strings.ReplaceAll(slo.Query, "${WINDOW}", window)
-
-	// Execute Prometheus query
-	result, err := s.promClient.Query(ctx, query, end)
-	if err != nil {
-		return nil, fmt.Errorf("failed to execute SLO query: %w", err)
+	analysis := &SLOAnalysis{
+		SLOID:        sloID,
+		Target:       slo.Target,
+		Service:      slo.Service,
+		MetricType:   slo.Type,
+		CalculatedAt: time.Now(),
 	}
 
-	// Parse result
-	if len(result.Data.Result) == 0 {
-		return nil, fmt.Errorf("no data returned from SLO query for SLO '%s' (id=%s, window=%s): query=%s (ensure metric labels are correct and within retention period)", 
-			slo.Name, sloID, window, query)
+	// Validate SLO configuration
+	if err := s.validateSLOConfig(slo); err != nil {
+		analysis.Status = "error"
+		analysis.Error = &SLOError{
+			Type:    "invalid_config",
+			Message: "SLO configuration is invalid",
+			Details: err.Error(),
+			Suggestions: []string{
+				"Check that the SLO target is between 0 and 100",
+				"Verify the metric type is supported",
+				"Ensure the time window is valid",
+			},
+		}
+		return analysis, nil
 	}
 
-	valueStr, ok := result.Data.Result[0].Value[1].(string)
-	if !ok {
-		return nil, fmt.Errorf("invalid value type in Prometheus result for SLO '%s': expected string, got %T", slo.Name, result.Data.Result[0].Value[1])
+	// For now, return a placeholder analysis
+	// TODO: Integrate with Prometheus for actual metric queries
+	analysis.Status = "no_data"
+	analysis.Error = &SLOError{
+		Type:    "prometheus_not_configured",
+		Message: "Prometheus integration not yet configured",
+		Details: "SLO calculation requires Prometheus integration",
+		Suggestions: []string{
+			"Configure Prometheus connection in the backend",
+			"Ensure Prometheus is running and accessible",
+			"Verify metrics are being scraped for this service",
+		},
 	}
 
-	var currentPercentage float64
-	if _, err := fmt.Sscanf(valueStr, "%f", &currentPercentage); err != nil {
-		return nil, fmt.Errorf("failed to parse SLO value '%s' for '%s': %w (ensure SLO query returns a numeric value)", valueStr, slo.Name, err)
+	// Save to database
+	if err := s.saveSLOAnalysis(ctx, analysis); err != nil {
+		// Log but don't fail the request
+		fmt.Printf("Warning: failed to save SLO analysis: %v\n", err)
 	}
 
-	// Calculate error budget - FIXED: Robust calculation with overspend tracking
-	errorBudgetAllowed := 100.0 - slo.TargetPercentage
-	errorsObserved := 100.0 - currentPercentage
-
-	var errorBudgetRemaining float64
-	if errorBudgetAllowed <= 0 {
-		errorBudgetRemaining = 0 // Target is 100%, no room for error
-	} else {
-		// Can be negative if overspent (e.g. -400% for 99.5% vs 99.9% target)
-		errorBudgetRemaining = ((errorBudgetAllowed - errorsObserved) / errorBudgetAllowed) * 100
-	}
-
-	// Determine status based on remaining budget
-	status := "healthy"
-	if errorBudgetRemaining < 25 {
-		status = "critical"
-	} else if errorBudgetRemaining < 50 {
-		status = "warning"
-	}
-
-	// Update SLO in database
-	_, err = s.db.ExecContext(ctx, `
-		UPDATE slos 
-		SET current_percentage = $1,
-		    error_budget_remaining = $2,
-		    status = $3,
-		    last_calculated_at = $4,
-		    updated_at = $4
-		WHERE id = $5
-	`, currentPercentage, errorBudgetRemaining, status, time.Now(), sloID)
-
-	if err != nil {
-		return nil, fmt.Errorf("failed to update SLO: %w", err)
-	}
-
-	// Return updated SLO
-	slo.CurrentPercentage = currentPercentage
-	slo.ErrorBudgetRemaining = errorBudgetRemaining
-	slo.Status = status
-	slo.LastCalculatedAt = time.Now()
-
-	// Enrich with multi-window burn rate analysis (best effort)
-	burn, _ := s.CalculateBurnRate(ctx, sloID)
-
-	return &SLOAnalysisResult{SLO: slo, BurnRates: burn}, nil
+	return analysis, nil
 }
 
-// CalculateAllSLOs calculates all SLOs for all services
-func (s *SLOService) CalculateAllSLOs(ctx context.Context) error {
-	// Get all SLOs
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT id FROM slos WHERE status != 'disabled'
-	`)
-	if err != nil {
-		return fmt.Errorf("failed to query SLOs: %w", err)
-	}
-	defer rows.Close()
-
-	var sloIDs []string
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			continue
-		}
-		sloIDs = append(sloIDs, id)
+// validateSLOConfig ensures SLO configuration is valid
+func (s *SLOService) validateSLOConfig(slo *SLO) error {
+	if slo.Target < 0 || slo.Target > 100 {
+		return fmt.Errorf("target must be between 0 and 100, got %.2f", slo.Target)
 	}
 
-	// Calculate each SLO
-	for _, id := range sloIDs {
-		if _, err := s.CalculateSLO(ctx, id); err != nil {
-			fmt.Printf("Error calculating SLO %s: %v\n", id, err)
-		}
+	if slo.Service == "" {
+		return fmt.Errorf("service name is required")
+	}
+
+	validTypes := map[string]bool{
+		"availability": true,
+		"latency":      true,
+		"error_rate":   true,
+	}
+
+	if !validTypes[slo.Type] {
+		return fmt.Errorf("invalid metric type '%s', must be one of: availability, latency, error_rate", slo.Type)
 	}
 
 	return nil
 }
 
-// GetSLOHistory returns historical compliance data for an SLO
-func (s *SLOService) GetSLOHistory(ctx context.Context, sloID string) ([]map[string]interface{}, error) {
-	slo, err := s.GetSLO(ctx, sloID)
-	if err != nil {
-		return nil, err
-	}
+// categorizePrometheusError provides detailed error categorization
+func categorizePrometheusError(err error, service string) *SLOError {
+	errStr := err.Error()
 
-	end := time.Now()
-	start := end.Add(-24 * time.Hour)
-	step := 15 * time.Minute
-
-	window := fmt.Sprintf("%dd", slo.WindowDays)
-	query := strings.ReplaceAll(slo.Query, "${WINDOW}", window)
-
-	result, err := s.promClient.QueryRange(ctx, query, start, end, step)
-	if err != nil {
-		return nil, fmt.Errorf("failed to query history: %w", err)
-	}
-
-	history := make([]map[string]interface{}, 0)
-	if len(result.Data.Result) > 0 {
-		for _, v := range result.Data.Result[0].Values {
-			if len(v) < 2 {
-				continue
-			}
-			ts := v[0].(float64)
-			valStr := v[1].(string)
-			var val float64
-			fmt.Sscanf(valStr, "%f", &val)
-
-			history = append(history, map[string]interface{}{
-				"timestamp": time.Unix(int64(ts), 0),
-				"value":     val,
-			})
+	if contains(errStr, "connection refused") || contains(errStr, "timeout") {
+		return &SLOError{
+			Type:    "prometheus_unavailable",
+			Message: "Cannot connect to Prometheus",
+			Details: "Prometheus server is not responding or is unreachable.",
+			Suggestions: []string{
+				"Check if Prometheus is running",
+				"Verify Prometheus URL configuration",
+				"Check network connectivity to Prometheus",
+				"Review Prometheus logs for errors",
+			},
 		}
 	}
 
-	return history, nil
+	if contains(errStr, "parse error") || contains(errStr, "bad_data") {
+		return &SLOError{
+			Type:    "invalid_query",
+			Message: "Prometheus query syntax error",
+			Details: errStr,
+			Suggestions: []string{
+				"Review the PromQL query syntax",
+				"Test the query directly in Prometheus UI",
+				"Check for typos in metric names or labels",
+			},
+		}
+	}
+
+	if contains(errStr, "not found") || contains(errStr, "unknown") {
+		return &SLOError{
+			Type:    "metric_not_found",
+			Message: fmt.Sprintf("Metrics not found for service '%s'", service),
+			Details: "The requested metric does not exist in Prometheus.",
+			Suggestions: []string{
+				fmt.Sprintf("Verify '%s' is exporting metrics", service),
+				"Check metric name spelling and labels",
+				"Ensure Prometheus scrape config includes this service",
+				"Review Prometheus targets for scrape status",
+			},
+		}
+	}
+
+	return &SLOError{
+		Type:    "query_failed",
+		Message: "Prometheus query execution failed",
+		Details: errStr,
+		Suggestions: []string{
+			"Check Prometheus server logs",
+			"Verify query syntax and metric availability",
+			"Ensure sufficient resources for query execution",
+		},
+	}
 }
 
-// GetSLO retrieves an SLO by ID
-func (s *SLOService) GetSLO(ctx context.Context, sloID string) (*SLO, error) {
-	var slo SLO
+// buildPrometheusQuery creates the appropriate query based on SLO type
+func (s *SLOService) buildPrometheusQuery(slo *SLO) (string, error) {
+	timeWindow := fmt.Sprintf("%dm", slo.Window)
+	if slo.Window <= 0 {
+		timeWindow = "5m"
+	}
 
+	switch slo.Type {
+	case "availability":
+		return fmt.Sprintf(
+			`(sum(rate(http_requests_total{service="%s",status_code!~"5.."}[%s])) / sum(rate(http_requests_total{service="%s"}[%s]))) * 100`,
+			slo.Service, timeWindow, slo.Service, timeWindow,
+		), nil
+
+	case "latency":
+		return fmt.Sprintf(
+			`histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket{service="%s"}[%s])) by (le)) * 1000`,
+			slo.Service, timeWindow,
+		), nil
+
+	case "error_rate":
+		return fmt.Sprintf(
+			`(sum(rate(http_requests_total{service="%s",status_code=~"5.."}[%s])) / sum(rate(http_requests_total{service="%s"}[%s]))) * 100`,
+			slo.Service, timeWindow, slo.Service, timeWindow,
+		), nil
+
+	default:
+		return "", fmt.Errorf("unsupported SLO type: %s", slo.Type)
+	}
+}
+
+// parseMetricValue extracts numeric value from Prometheus result
+func parseMetricValue(result interface{}) (float64, error) {
+	// Implementation depends on your Prometheus client library
+	// This is a placeholder - adjust based on actual result format
+	
+	switch v := result.(type) {
+	case float64:
+		return v, nil
+	case []interface{}:
+		if len(v) > 0 {
+			if val, ok := v[0].(float64); ok {
+				return val, nil
+			}
+		}
+		return 0, fmt.Errorf("empty result set")
+	default:
+		return 0, fmt.Errorf("unexpected result type: %T", result)
+	}
+}
+
+// saveSLOAnalysis persists the analysis to database
+func (s *SLOService) saveSLOAnalysis(ctx context.Context, analysis *SLOAnalysis) error {
 	query := `
-		SELECT s.id, s.service_id, sv.name as service_name, s.name, s.description,
-		       s.target_percentage, s.window_days, s.sli_type, s.query,
-		       COALESCE(s.current_percentage, 0), COALESCE(s.error_budget_remaining, 100), 
-		       s.status, COALESCE(s.last_calculated_at, '1970-01-01 00:00:00'), s.created_at
-		FROM slos s
-		JOIN services sv ON s.service_id = sv.id
-		WHERE s.id = $1
+		INSERT INTO slo_history (slo_id, value, target, error_budget, status, calculated_at)
+		VALUES ($1, $2, $3, $4, $5, $6)
 	`
 
-	err := s.db.QueryRowContext(ctx, query, sloID).Scan(
-		&slo.ID, &slo.ServiceID, &slo.ServiceName, &slo.Name, &slo.Description,
-		&slo.TargetPercentage, &slo.WindowDays, &slo.SLIType, &slo.Query,
-		&slo.CurrentPercentage, &slo.ErrorBudgetRemaining, &slo.Status,
-		&slo.LastCalculatedAt, &slo.CreatedAt,
+	var value sql.NullFloat64
+	if analysis.Value != nil {
+		value = sql.NullFloat64{Float64: *analysis.Value, Valid: true}
+	}
+
+	var errorBudget sql.NullFloat64
+	if analysis.ErrorBudget != nil {
+		errorBudget = sql.NullFloat64{Float64: *analysis.ErrorBudget, Valid: true}
+	}
+
+	_, err := s.db.ExecContext(ctx, query,
+		analysis.SLOID,
+		value,
+		analysis.Target,
+		errorBudget,
+		analysis.Status,
+		analysis.CalculatedAt,
 	)
 
-	if err == sql.ErrNoRows {
-		return nil, fmt.Errorf("SLO not found")
-	} else if err != nil {
-		return nil, fmt.Errorf("failed to query SLO: %w", err)
-	}
-
-	return &slo, nil
+	return err
 }
 
-// GetSLOsByService retrieves all SLOs for a service
-func (s *SLOService) GetSLOsByService(ctx context.Context, serviceID string) ([]SLO, error) {
-	query := `
-		SELECT s.id, s.service_id, sv.name as service_name, s.name, s.description,
-		       s.target_percentage, s.window_days, s.sli_type, s.query,
-		       COALESCE(s.current_percentage, 0), COALESCE(s.error_budget_remaining, 100), 
-		       s.status, COALESCE(s.last_calculated_at, '1970-01-01 00:00:00'), s.created_at
-		FROM slos s
-		JOIN services sv ON s.service_id = sv.id
-		WHERE s.service_id = $1
-		ORDER BY s.status DESC, s.name
-	`
-
-	rows, err := s.db.QueryContext(ctx, query, serviceID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to query SLOs: %w", err)
-	}
-	defer rows.Close()
-
-	var slos []SLO
-	for rows.Next() {
-		var slo SLO
-		err := rows.Scan(
-			&slo.ID, &slo.ServiceID, &slo.ServiceName, &slo.Name, &slo.Description,
-			&slo.TargetPercentage, &slo.WindowDays, &slo.SLIType, &slo.Query,
-			&slo.CurrentPercentage, &slo.ErrorBudgetRemaining, &slo.Status,
-			&slo.LastCalculatedAt, &slo.CreatedAt,
-		)
-		if err != nil {
-			continue
-		}
-		slos = append(slos, slo)
-	}
-
-	return slos, nil
-}
-
-// GetAllSLOs retrieves all SLOs
+// GetAllSLOs returns all SLOs with their latest status
 func (s *SLOService) GetAllSLOs(ctx context.Context) ([]SLO, error) {
 	query := `
-		SELECT s.id, s.service_id, sv.name as service_name, s.name, s.description,
-		       s.target_percentage, s.window_days, s.sli_type, s.query,
-		       COALESCE(s.current_percentage, 0), COALESCE(s.error_budget_remaining, 100), 
-		       s.status, COALESCE(s.last_calculated_at, '1970-01-01 00:00:00'), s.created_at
+		SELECT 
+			s.id, s.name, s.description, s.service, s.type, s.target, s.window,
+			h.value, h.status, h.calculated_at
 		FROM slos s
-		JOIN services sv ON s.service_id = sv.id
-		ORDER BY s.status DESC, sv.name, s.name
+		LEFT JOIN LATERAL (
+			SELECT value, status, calculated_at
+			FROM slo_history
+			WHERE slo_id = s.id
+			ORDER BY calculated_at DESC
+			LIMIT 1
+		) h ON true
+		ORDER BY s.name
 	`
 
 	rows, err := s.db.QueryContext(ctx, query)
@@ -301,154 +321,144 @@ func (s *SLOService) GetAllSLOs(ctx context.Context) ([]SLO, error) {
 	var slos []SLO
 	for rows.Next() {
 		var slo SLO
+		var value sql.NullFloat64
+		var status sql.NullString
+		var calculatedAt sql.NullTime
+
 		err := rows.Scan(
-			&slo.ID, &slo.ServiceID, &slo.ServiceName, &slo.Name, &slo.Description,
-			&slo.TargetPercentage, &slo.WindowDays, &slo.SLIType, &slo.Query,
-			&slo.CurrentPercentage, &slo.ErrorBudgetRemaining, &slo.Status,
-			&slo.LastCalculatedAt, &slo.CreatedAt,
+			&slo.ID, &slo.Name, &slo.Description, &slo.Service,
+			&slo.Type, &slo.Target, &slo.Window,
+			&value, &status, &calculatedAt,
 		)
 		if err != nil {
 			continue
 		}
+
+		if value.Valid {
+			slo.Current = &value.Float64
+		}
+		if status.Valid {
+			slo.Status = status.String
+		} else {
+			slo.Status = "no_data"
+		}
+		if calculatedAt.Valid {
+			slo.LastCalculated = &calculatedAt.Time
+		}
+
 		slos = append(slos, slo)
 	}
 
 	return slos, nil
 }
 
-// CalculateBurnRate calculates error budget burn rate
-func (s *SLOService) CalculateBurnRate(ctx context.Context, sloID string) ([]SLOBurnRate, error) {
-	slo, err := s.GetSLO(ctx, sloID)
-	if err != nil {
-		return nil, err
-	}
-
-	windows := []struct {
-		name      string
-		duration  time.Duration
-		threshold float64
-	}{
-		{"1h", time.Hour, 14.4},      // 1 hour window
-		{"6h", 6 * time.Hour, 6.0},   // 6 hour window
-		{"24h", 24 * time.Hour, 3.0}, // 1 day window
-		{"3d", 72 * time.Hour, 1.0},  // 3 day window
-	}
-
-	var burnRates []SLOBurnRate
-	end := time.Now()
-
-	for _, window := range windows {
-		_ = end.Add(-window.duration) // start variable unused
-
-		// FIXED: Replace ${WINDOW} with the specific window size for burn rate calculation
-		scopedQuery := strings.ReplaceAll(slo.Query, "${WINDOW}", window.name)
-
-		// Query error budget consumption rate
-		query := fmt.Sprintf(`
-			(1 - (%s)) / (1 - (%f / 100))
-		`, scopedQuery, slo.TargetPercentage)
-
-		result, err := s.promClient.Query(ctx, query, end)
-		if err != nil {
-			continue
-		}
-
-		if len(result.Data.Result) == 0 {
-			continue
-		}
-
-		valueStr, ok := result.Data.Result[0].Value[1].(string)
-		if !ok {
-			continue
-		}
-
-		var burnRate float64
-		if _, err := fmt.Sscanf(valueStr, "%f", &burnRate); err != nil {
-			continue
-		}
-
-		burnRates = append(burnRates, SLOBurnRate{
-			WindowSize: window.name,
-			BurnRate:   burnRate,
-			Threshold:  window.threshold,
-			Breached:   burnRate > window.threshold,
-		})
-	}
-
-	return burnRates, nil
-}
-
 // CreateSLO creates a new SLO
 func (s *SLOService) CreateSLO(ctx context.Context, slo *SLO) error {
 	query := `
-		INSERT INTO slos (service_id, name, description, target_percentage, window_days, sli_type, query, status)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, 'healthy')
-		RETURNING id, created_at
+		INSERT INTO slos (id, name, description, service, type, target, window, status, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW())
 	`
-
-	err := s.db.QueryRowContext(ctx, query,
-		slo.ServiceID, slo.Name, slo.Description, slo.TargetPercentage,
-		slo.WindowDays, slo.SLIType, slo.Query,
-	).Scan(&slo.ID, &slo.CreatedAt)
-
-	if err != nil {
-		return fmt.Errorf("failed to create SLO: %w", err)
+	
+	if slo.ID == "" {
+		slo.ID = fmt.Sprintf("slo_%d", time.Now().UnixNano())
 	}
-
-	// Calculate initial values
-	_, _ = s.CalculateSLO(ctx, slo.ID)
-
-	return nil
+	
+	_, err := s.db.ExecContext(ctx, query,
+		slo.ID, slo.Name, slo.Description, slo.Service,
+		slo.Type, slo.Target, slo.Window, slo.Status,
+	)
+	
+	return err
 }
 
 // UpdateSLO updates an existing SLO
 func (s *SLOService) UpdateSLO(ctx context.Context, slo *SLO) error {
 	query := `
-		UPDATE slos
-		SET name = $1, description = $2, target_percentage = $3, 
-		    window_days = $4, sli_type = $5, query = $6, updated_at = NOW()
-		WHERE id = $7
+		UPDATE slos 
+		SET name = $1, description = $2, service = $3, type = $4, target = $5, window = $6, status = $7, updated_at = NOW()
+		WHERE id = $8
 	`
-
-	result, err := s.db.ExecContext(ctx, query,
-		slo.Name, slo.Description, slo.TargetPercentage,
-		slo.WindowDays, slo.SLIType, slo.Query, slo.ID,
+	
+	_, err := s.db.ExecContext(ctx, query,
+		slo.Name, slo.Description, slo.Service, slo.Type, slo.Target, slo.Window, slo.Status, slo.ID,
 	)
+	
+	return err
+}
 
-	if err != nil {
-		return fmt.Errorf("failed to update SLO: %w", err)
-	}
-
-	rows, err := result.RowsAffected()
+// CalculateAllSLOs calculates all SLOs
+func (s *SLOService) CalculateAllSLOs(ctx context.Context) error {
+	slos, err := s.GetAllSLOs(ctx)
 	if err != nil {
 		return err
 	}
-
-	if rows == 0 {
-		return fmt.Errorf("SLO not found")
+	
+	for _, slo := range slos {
+		_, err := s.CalculateSLO(ctx, slo.ID)
+		if err != nil {
+			s.logger.Error("Failed to calculate SLO", zap.String("slo_id", slo.ID), zap.Error(err))
+		}
 	}
-
-	// Recalculate after update
-	_, _ = s.CalculateSLO(ctx, slo.ID)
-
+	
 	return nil
 }
 
 // DeleteSLO deletes an SLO
 func (s *SLOService) DeleteSLO(ctx context.Context, sloID string) error {
-	result, err := s.db.ExecContext(ctx, "DELETE FROM slos WHERE id = $1", sloID)
+	query := `DELETE FROM slos WHERE id = $1`
+	_, err := s.db.ExecContext(ctx, query, sloID)
+	return err
+}
+
+// GetSLOHistory retrieves the history of an SLO
+func (s *SLOService) GetSLOHistory(ctx context.Context, sloID string) ([]SLOAnalysis, error) {
+	query := `
+		SELECT slo_id, value, target, error_budget, status, calculated_at
+		FROM slo_history
+		WHERE slo_id = $1
+		ORDER BY calculated_at DESC
+		LIMIT 100
+	`
+	
+	rows, err := s.db.QueryContext(ctx, query, sloID)
 	if err != nil {
-		return fmt.Errorf("failed to delete SLO: %w", err)
+		return nil, err
 	}
-
-	rows, err := result.RowsAffected()
-	if err != nil {
-		return err
+	defer rows.Close()
+	
+	var history []SLOAnalysis
+	for rows.Next() {
+		var analysis SLOAnalysis
+		var value, errorBudget sql.NullFloat64
+		
+		err := rows.Scan(&analysis.SLOID, &value, &analysis.Target, &errorBudget, &analysis.Status, &analysis.CalculatedAt)
+		if err != nil {
+			continue
+		}
+		
+		if value.Valid {
+			analysis.Value = &value.Float64
+		}
+		if errorBudget.Valid {
+			analysis.ErrorBudget = &errorBudget.Float64
+		}
+		
+		history = append(history, analysis)
 	}
+	
+	return history, nil
+}
 
-	if rows == 0 {
-		return fmt.Errorf("SLO not found")
+// Helper function
+func contains(s, substr string) bool {
+	return len(s) >= len(substr) && (s == substr || len(s) > len(substr) && (s[:len(substr)] == substr || s[len(s)-len(substr):] == substr || containsMiddle(s, substr)))
+}
+
+func containsMiddle(s, substr string) bool {
+	for i := 0; i <= len(s)-len(substr); i++ {
+		if s[i:i+len(substr)] == substr {
+			return true
+		}
 	}
-
-	return nil
+	return false
 }

@@ -4,12 +4,16 @@
     "private": true,
     "scripts": {
         "dev": "vite",
+        "dev:mock": "VITE_USE_MOCK_DATA=true vite",
         "build": "tsc --noEmit && vite build",
+        "build:prod": "NODE_ENV=production vite build",
         "preview": "vite preview",
         "typecheck": "tsc --noEmit",
         "test": "jest",
         "test:watch": "jest --watch",
-        "test:coverage": "jest --coverage"
+        "test:coverage": "jest --coverage",
+        "lint": "echo 'Linting not configured yet'",
+        "clean": "rm -rf dist"
     },
     "dependencies": {
         "@emotion/css": "^11.11.2",

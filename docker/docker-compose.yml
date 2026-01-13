@@ -8,11 +8,12 @@ services:
     ports:
       - "3000:3000"
     environment:
-      GF_PLUGINS_ALLOW_LOADING_UNSIGNED_PLUGINS: "sarika-reliability-studio-app"
+      GF_PLUGINS_ALLOW_LOADING_UNSIGNED_PLUGINS: "sarika-reliability-studio-panel,sarika-reliability-studio-app"
       GF_APP_MODE: "production"
       GF_FEATURE_TOGGLES_DISABLE_ANGULAR: "true"
     volumes:
-      - ../dist:/var/lib/grafana/plugins/reliability-studio
+      - ../reliability-studio:/var/lib/grafana/plugins/reliability-studio
+      - ../dist:/var/lib/grafana/plugins/sarika-reliability-studio-app
       - ./grafana.ini:/etc/grafana/grafana.ini
       - ./grafana/provisioning:/etc/grafana/provisioning
     depends_on:

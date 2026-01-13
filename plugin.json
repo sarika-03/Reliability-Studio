@@ -1,51 +1,20 @@
 {
-  "type": "app",
   "id": "sarika-reliability-studio-app",
-  "name": "Reliability Studio",
-  "version": "1.0.0",
-  "module": "dist/module.js",
+  "type": "app",
+  "name": "Sarika Reliability Studio",
   "info": {
-    "description": "Unified reliability & incident response workspace for Grafana",
+    "description": "Reliability Engineering Platform",
     "author": {
-      "name": "Sarika",
-      "url": "https://github.com/sarika-03"
+      "name": "Sarika"
     },
-    "keywords": [
-      "sre",
-      "reliability",
-      "observability",
-      "incident",
-      "slo"
-    ],
-    "version": "1.0.0",
-    "updated": "2026-01-09",
-    "logos": {
-      "small": "img/logo.svg",
-      "large": "img/logo.svg"
-    },
-    "screenshots": [
-      {
-        "name": "Main Dashboard",
-        "path": "https://raw.githubusercontent.com/sarika-03/Reliability-Studio/main/public/screenshots/dashboard.png"
-      }
-    ],
-    "links": [
-      {
-        "name": "GitHub",
-        "url": "https://github.com/sarika-03/Reliability-Studio"
-      },
-      {
-        "name": "Documentation",
-        "url": "https://github.com/sarika-03/Reliability-Studio/blob/main/README.md"
-      },
-      {
-        "name": "Changelog",
-        "url": "https://github.com/sarika-03/Reliability-Studio/blob/main/CHANGELOG.md"
-      }
-    ]
+    "version": "1.0.0"
   },
-  "dependencies": {
-    "grafanaVersion": ">=10.0.0 <11.0.0",
-    "plugins": []
-  }
+  "includes": [
+    {
+      "type": "page",
+      "name": "Dashboard",
+      "path": "/a/sarika-reliability-studio-app"
+    }
+  ],
+  "module": "dist/module.js"
 }

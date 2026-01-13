@@ -308,7 +308,7 @@ export function StateRenderer({
 export function useUIState<T>() {
   const [state, setState] = React.useState<UIState>('idle');
   const [data, setData] = React.useState<T | null>(null);
-  const [error, setError] = React.useState<UIStateConfig['error'] | null>(null);
+  const [error, setError] = React.useState<UIStateConfig['error'] | undefined>(undefined);
 
   const config: UIStateConfig = {
     state,
@@ -330,7 +330,7 @@ export function useUIState<T>() {
     reset: () => {
       setState('idle');
       setData(null);
-      setError(null);
+      setError(undefined);
     },
   };
 
