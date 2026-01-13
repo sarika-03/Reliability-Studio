@@ -36,7 +36,7 @@ type LogEntry struct {
 	Labels    map[string]string `json:"labels"`
 }
 
-// NewLokiClient creates a new Loki client
+
 func NewLokiClient(baseURL string) *LokiClient {
 	return &LokiClient{
 		baseURL: baseURL,

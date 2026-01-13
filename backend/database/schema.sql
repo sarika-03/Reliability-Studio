@@ -211,7 +211,7 @@ $$ language 'plpgsql';
 DROP TRIGGER IF EXISTS calculate_metrics_on_resolve ON incidents;
 CREATE TRIGGER calculate_metrics_on_resolve BEFORE UPDATE ON incidents FOR EACH ROW EXECUTE FUNCTION calculate_incident_metrics();
 
--- Insert sample data
+
 INSERT INTO services (name, description, team) VALUES
     ('auth-service', 'Authentication and authorization service', 'Platform'),
     ('payment-service', 'Payment processing service', 'Payments'),
@@ -231,7 +231,7 @@ INSERT INTO correlation_rules (name, description, rule_type, query, threshold_va
      1.0, 'high', true)
 ON CONFLICT (name) DO NOTHING;
 
--- Investigation Hypotheses (for RCA workflows)
+-- Investigation Hypothesesss (for RCA workflows)
 CREATE TABLE IF NOT EXISTS investigation_hypotheses (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     incident_id UUID REFERENCES incidents(id) ON DELETE CASCADE,

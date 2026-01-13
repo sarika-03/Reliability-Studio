@@ -20,7 +20,7 @@ func AnalyzeMetrics(raw string) MetricResult {
 	val := results[0].(map[string]any)["value"].([]any)[1].(string)
 
 	return MetricResult{
-		ErrorRate: 0.0, // you can derive this with more queries later
+		ErrorRate: 0.0, 
 		Latency:   parseFloat(val),
 	}
 }
