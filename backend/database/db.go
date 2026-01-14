@@ -108,8 +108,8 @@ func SeedDefaultData(db *sql.DB) error {
 	var err error
 	for _, svc := range services {
 		_, err = db.Exec(`
-			INSERT INTO services (name, description, owner_team, status)
-			VALUES ($1, $2, $3, 'healthy')
+			INSERT INTO services (name, description, team)
+			VALUES ($1, $2, $3)
 			ON CONFLICT (name) DO NOTHING
 		`, svc.name, svc.description, svc.team)
 

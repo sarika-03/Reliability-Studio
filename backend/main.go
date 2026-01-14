@@ -134,6 +134,8 @@ func main() {
 	sloService := services.NewSLOService(db, zapLogger)
 	timelineService := services.NewTimelineService(db)
 	investigationService := services.NewInvestigationService(db, zapLogger)
+	incidentService := services.NewIncidentService(db, zapLogger)
+	recoveryActionService := services.NewRecoveryActionService(db, zapLogger, k8sClient)
 	correlationEngine := correlation.NewCorrelationEngine(db, promClient, k8sInterface, lokiClient)
 
 	// Initialize stability systems
@@ -232,12 +234,14 @@ func main() {
 	// Setup middleware - Security first
 	router.Use(middleware.Recovery)
 	router.Use(middleware.Logging)
+	router.Use(middleware.CORSMiddleware)  // Add CORS support for frontend
 	router.Use(middleware.SecurityHeadersMiddleware)
 	router.Use(middleware.RateLimitingMiddleware)
 	
 	// Initialize detection handlers
 	handlers.InitDetectionHandlers(detector)
 	handlers.InitInvestigationHandlers(investigationService)
+	handlers.InitRecoveryActionHandlers(recoveryActionService, incidentService, zapLogger)
 
 	// Add telemetry middleware to capture all metrics and logs
 	telemetryMiddleware := middleware.NewTelemetryMiddleware(promClient, lokiClient, "reliability-studio")
@@ -307,6 +311,12 @@ func main() {
 	// Logs routes
 	api.HandleFunc("/logs/{service}/errors", server.getErrorLogsHandler).Methods("GET")
 	api.HandleFunc("/logs/{service}/search", server.searchLogsHandler).Methods("GET")
+
+	// Recovery Action routes
+	api.HandleFunc("/incidents/{id}/recovery/actions", handlers.GetRecoveryActions).Methods("GET")
+	api.HandleFunc("/incidents/{id}/recovery/suggest", handlers.SuggestRecoveryActions).Methods("POST")
+	api.HandleFunc("/recovery/actions/{action_id}/approve", handlers.ApproveRecoveryAction).Methods("POST")
+	api.HandleFunc("/recovery/actions/{action_id}/execute", handlers.ExecuteRecoveryAction).Methods("POST")
 
 	// Admin routes
 	admin := api.PathPrefix("/admin").Subrouter()
@@ -1010,7 +1020,7 @@ func (s *Server) getUsersHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) getServicesHandler(w http.ResponseWriter, r *http.Request) {
-	rows, err := s.db.Query(`SELECT id, name, status FROM services ORDER BY name`)
+	rows, err := s.db.Query(`SELECT id, name, description, team FROM services ORDER BY name`)
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, "Failed to get services")
 		return
@@ -1019,14 +1029,20 @@ func (s *Server) getServicesHandler(w http.ResponseWriter, r *http.Request) {
 
 	services := make([]map[string]interface{}, 0)
 	for rows.Next() {
-		var id, name, status string
-		if err := rows.Scan(&id, &name, &status); err != nil {
+		var id, name, description string
+		var team sql.NullString
+		if err := rows.Scan(&id, &name, &description, &team); err != nil {
 			continue
 		}
+		teamVal := ""
+		if team.Valid {
+			teamVal = team.String
+		}
 		services = append(services, map[string]interface{}{
-			"id":     id,
-			"name":   name,
-			"status": status,
+			"id":          id,
+			"name":        name,
+			"description": description,
+			"team":        teamVal,
 		})
 	}
 
