@@ -108,8 +108,8 @@ func SeedDefaultData(db *sql.DB) error {
 	var err error
 	for _, svc := range services {
 		_, err = db.Exec(`
-			INSERT INTO services (name, description, team)
-			VALUES ($1, $2, $3)
+			INSERT INTO services (name, description, owner_team, status)
+			VALUES ($1, $2, $3, 'healthy')
 			ON CONFLICT (name) DO NOTHING
 		`, svc.name, svc.description, svc.team)
 
@@ -166,19 +166,19 @@ func SeedDefaultData(db *sql.DB) error {
 	}{
 		{
 			name:           "High Error Rate",
-			description:    "Detects error rate > 20% for any service (tuned for demo)",
+			description:    "Detects error rate > 30% for any service (tuned for demo)",
 			ruleType:       "threshold",
 			// Uses the same metric shape as SLOs and /api/test/fail. Value is a ratio [0,1].
 			query:          `rate(http_requests_total{service=~".+",status=~"5.."}[5m]) / rate(http_requests_total{service=~".+"}[5m])`,
-			thresholdValue: 0.20,
+			thresholdValue: 0.30,
 			severity:       "critical",
 		},
 		{
 			name:           "High Latency",
-			description:    "Detects P95 latency > 1s",
+			description:    "Detects P95 latency > 2s",
 			ruleType:       "threshold",
 			query:          `histogram_quantile(0.95, rate(http_request_duration_seconds_bucket{service=~".+"}[5m]))`,
-			thresholdValue: 1.0,
+			thresholdValue: 2.0,
 			severity:       "high",
 		},
 	}

@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"time"
 )
@@ -37,15 +38,14 @@ func (ts *TimelineService) AddEvent(ctx context.Context, event *TimelineEvent) e
 		RETURNING id, created_at
 	`
 
-	metadataJSON := "{}"
-	if event.Metadata != nil {
-		// Simple JSON marshaling (in production, use proper JSON handling)
-		metadataJSON = fmt.Sprintf("%v", event.Metadata)
+	metadataJSON, err := json.Marshal(event.Metadata)
+	if err != nil {
+		metadataJSON = []byte("{}")
 	}
 
-	err := ts.db.QueryRowContext(ctx, query,
+	err = ts.db.QueryRowContext(ctx, query,
 		event.IncidentID, event.EventType, event.Source, event.Title,
-		event.Description, event.Severity, metadataJSON, event.CreatedBy,
+		event.Description, event.Severity, string(metadataJSON), event.CreatedBy,
 	).Scan(&event.ID, &event.CreatedAt)
 
 	return err
@@ -81,9 +81,13 @@ func (ts *TimelineService) GetTimeline(ctx context.Context, incidentID string) (
 			continue
 		}
 
-		// Parse metadata (simplified)
-		event.Metadata = make(map[string]interface{})
-		event.Metadata["raw"] = metadataJSON
+		// Parse metadata
+		if metadataJSON != "" {
+			if err := json.Unmarshal([]byte(metadataJSON), &event.Metadata); err != nil {
+				event.Metadata = make(map[string]interface{})
+				event.Metadata["raw"] = metadataJSON
+			}
+		}
 
 		events = append(events, event)
 	}

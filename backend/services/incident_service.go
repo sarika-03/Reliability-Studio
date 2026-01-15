@@ -24,7 +24,7 @@ func NewIncidentService(db *sql.DB, logger *zap.Logger) *IncidentService {
 	}
 }
 
-// GetIncidents retrieves incidents with optional filters
+	// GetIncidents retrieves incidents with optional filters
 func (s *IncidentService) GetIncidents(ctx context.Context, status, severity string) ([]models.Incident, error) {
 	query := `
         SELECT id, title, description, severity, status, commander_user_id,
@@ -37,21 +37,21 @@ func (s *IncidentService) GetIncidents(ctx context.Context, status, severity str
 	argNum := 1
 
 	if status != "" {
-		query += " AND status = $" + string(rune(argNum+'0'))
+		query += fmt.Sprintf(" AND status = $%d", argNum)
 		args = append(args, status)
 		argNum++
 	}
 
 	if severity != "" {
-		query += " AND severity = $" + string(rune(argNum+'0'))
+		query += fmt.Sprintf(" AND severity = $%d", argNum)
 		args = append(args, severity)
 	}
 
 	query += " ORDER BY started_at DESC"
 
-	var incidents []models.Incident
+	incidents := []models.Incident{} // Initialize as empty slice
 	err := s.db.SelectContext(ctx, &incidents, query, args...)
-	if err != nil {
+	if err != nil && err != sql.ErrNoRows {
 		s.logger.Error("Failed to get incidents", zap.Error(err))
 		return nil, err
 	}
@@ -59,7 +59,7 @@ func (s *IncidentService) GetIncidents(ctx context.Context, status, severity str
 	// Load services for each incident
 	for i := range incidents {
 		services, err := s.getIncidentServices(ctx, incidents[i].ID)
-		if err != nil {
+		if err != nil && err != sql.ErrNoRows {
 			s.logger.Warn("Failed to load services for incident",
 				zap.String("incident_id", incidents[i].ID.String()),
 				zap.Error(err))
@@ -156,9 +156,6 @@ func (s *IncidentService) GetByID(ctx context.Context, id string) (*models.Incid
 	// Load related data
 	incident.Services, _ = s.getIncidentServices(ctx, incident.ID)
 	incident.Timeline, _ = s.GetTimeline(ctx, id)
-	incident.Pods, _ = s.getPodIncidentData(ctx, incident.ID)
-	incident.Logs, _ = s.getLogIncidentData(ctx, incident.ID)
-	incident.Traces, _ = s.getTraceIncidentData(ctx, incident.ID)
 
 	return &incident, nil
 }
@@ -249,7 +246,7 @@ func (s *IncidentService) GetTimeline(ctx context.Context, incidentID string) ([
 		return nil, err
 	}
 
-	var events []models.TimelineEvent
+	events := []models.TimelineEvent{} // Initialize as empty slice
 	query := `
         SELECT id, incident_id, event_type, timestamp, source, title, description, metadata, created_at
         FROM timeline_events
@@ -257,7 +254,7 @@ func (s *IncidentService) GetTimeline(ctx context.Context, incidentID string) ([
         ORDER BY timestamp ASC
     `
 	err = s.db.SelectContext(ctx, &events, query, incidentUUID)
-	if err != nil {
+	if err != nil && err != sql.ErrNoRows {
 		s.logger.Error("Failed to get timeline", zap.Error(err))
 		return nil, err
 	}
@@ -276,54 +273,6 @@ func (s *IncidentService) getIncidentServices(ctx context.Context, incidentID uu
     `
 	err := s.db.SelectContext(ctx, &services, query, incidentID)
 	return services, err
-}
-
-// getPodIncidentData retrieves pod data related to an incident
-func (s *IncidentService) getPodIncidentData(ctx context.Context, incidentID uuid.UUID) ([]models.PodIncidentData, error) {
-	var pods []models.PodIncidentData
-	query := `
-		SELECT id, incident_id, pod_name, namespace, status, restarts, last_restart_time, confidence_score, created_at
-		FROM pod_incident_data
-		WHERE incident_id = $1
-		ORDER BY confidence_score DESC
-	`
-	err := s.db.SelectContext(ctx, &pods, query, incidentID)
-	if err != nil && err != sql.ErrNoRows {
-		s.logger.Error("Failed to get pod incident data", zap.Error(err))
-	}
-	return pods, nil
-}
-
-// getLogIncidentData retrieves log pattern data related to an incident
-func (s *IncidentService) getLogIncidentData(ctx context.Context, incidentID uuid.UUID) ([]models.LogIncidentData, error) {
-	var logs []models.LogIncidentData
-	query := `
-		SELECT id, incident_id, pattern, count, first_seen, last_seen, sample_logs, confidence_score, created_at
-		FROM log_incident_data
-		WHERE incident_id = $1
-		ORDER BY confidence_score DESC
-	`
-	err := s.db.SelectContext(ctx, &logs, query, incidentID)
-	if err != nil && err != sql.ErrNoRows {
-		s.logger.Error("Failed to get log incident data", zap.Error(err))
-	}
-	return logs, nil
-}
-
-// getTraceIncidentData retrieves trace data related to an incident
-func (s *IncidentService) getTraceIncidentData(ctx context.Context, incidentID uuid.UUID) ([]models.TraceIncidentData, error) {
-	var traces []models.TraceIncidentData
-	query := `
-		SELECT id, incident_id, failure_count, success_count, error_rate, average_latency, confidence_score, created_at
-		FROM trace_incident_data
-		WHERE incident_id = $1
-		LIMIT 1
-	`
-	err := s.db.SelectContext(ctx, &traces, query, incidentID)
-	if err != nil && err != sql.ErrNoRows {
-		s.logger.Error("Failed to get trace incident data", zap.Error(err))
-	}
-	return traces, nil
 }
 
 func timePtr(t time.Time) *time.Time {

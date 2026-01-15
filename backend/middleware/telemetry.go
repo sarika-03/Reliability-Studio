@@ -121,7 +121,7 @@ func (tm *TelemetryMiddleware) recordMetrics(ctx context.Context, r *http.Reques
 	}
 
 	// Log metrics push
-	log.Printf("📊 Metrics: %s %s -> %d in %.2fms (trace: %s)", method, path, w.statusCode, duration.Milliseconds(), traceID)
+	log.Printf("📊 Metrics: %s %s -> %d in %dms (trace: %s)", method, path, w.statusCode, duration.Milliseconds(), traceID)
 }
 
 // recordLogs records request logs to Loki
@@ -169,7 +169,7 @@ func (tm *TelemetryMiddleware) recordLogs(ctx context.Context, r *http.Request, 
 	}
 
 	// Log to stdout as well
-	log.Printf("📝 [%s] %s %s -> %d in %.2fms (trace: %s)", level, r.Method, r.URL.Path, w.statusCode, duration.Milliseconds(), traceID)
+	log.Printf("📝 [%s] %s %s -> %d in %dms (trace: %s)", level, r.Method, r.URL.Path, w.statusCode, duration.Milliseconds(), traceID)
 }
 
 // shouldSkipTelemetry determines if a path should skip telemetry recording

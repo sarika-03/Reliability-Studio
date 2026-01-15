@@ -1,6 +1,8 @@
-# 🎯 Sarika Reliability Studio - Grafana App Plugin
+# 🧭 Project Definition — Reliability Studio
 
-A comprehensive **Reliability Engineering Platform** integrated with Grafana for unified incident management, SLO tracking, and real-time system reliability monitoring.
+Reliability Studio ek Reliability Control Plane hai jo Grafana App Plugin ke form mein bana hai. Iska main goal yeh hai ki SREs aur engineers ko incident ke waqt alag-alag tools, dashboards, queries aur tabs ke beech bhatakna na pade. Jab koi system failure hota hai, toh Reliability Studio automatically incident create karta hai aur ek hi screen par
+
+Normal time par engineer Grafana dashboards se system health monitor karta hai. Jaise hi failure hota hai, Reliability Studio automatically incident create karke UI mein show karta hai. On-call engineer directly Reliability Studio open karta hai aur bina kisi manual query ya dashboard switching ke investigation karta hai, root cause samajhta hai, telemetry dekhta hai, impact assess karta hai aur incident resolve karta hai. Incident resolve hote hi system state update ho jata hai aur UI clean ho jati hai. Post-incident review ke liye timeline aur analysis already stored hota hai.
 
 ![Status](https://img.shields.io/badge/Status-Fully%20Operational-brightgreen?style=flat-square)
 ![Version](https://img.shields.io/badge/Version-1.0.0-blue?style=flat-square)
@@ -28,53 +30,47 @@ A comprehensive **Reliability Engineering Platform** integrated with Grafana for
 
 ## 🎨 Overview
 
-**Sarika Reliability Studio** is a Grafana App Plugin that provides:
+**Sarika Reliability Studio** is an Intelligent Reliability Control Plane that provides:
 
-- 📊 **Real-time Incident Management** - Track and investigate production incidents
-- 🎯 **SLO Tracking** - Monitor Service Level Objectives and error budgets
-- 🔍 **Root Cause Analysis** - Automated correlation and investigation workflows
-- 📈 **Reliability Metrics** - Track availability, latency, and error rates
-- 🚨 **Incident Detection** - Automatic detection of anomalies and failures
-- 🔄 **Real-time Updates** - WebSocket-based live incident notifications
+- 📊 **Real-time Incident Management** - Centralized tracking for production failures.
+- 🤖 **Autonomous Reliability Agent (ARA)** - An AI-driven agent that investigates incidents by correlating metrics, logs, and infrastructure state automatically.
+- 🎯 **SLO Tracking** - Precision monitoring of Service Level Objectives and Error Budgets with Prometheus integration.
+- 🔍 **Statistical Anomaly Detection** - Detector engine using Z-score and pattern recognition to catch subtle system regressions.
+- �️ **Automated Remediation** - Self-healing capabilities like automated K8s restarts and traffic shifting.
+- 🔄 **Live Event Pipeline** - WebSocket-based broadcasting of detections, investigations, and logs.
 
 **Perfect for:**
-- Site Reliability Engineers (SREs)
-- DevOps Teams
-- Platform Engineers
-- Operations Teams
+- Site Reliability Engineers (SREs) needing to reduce MTTR.
+- DevOps Teams seeking to automate the incident lifecycle.
+- Platform Engineers building resilient infrastructure.
 
 ---
 
 ## ✨ Features
 
 ### 🎯 Incident Management
-- ✅ Real-time incident tracking
-- ✅ Incident severity classification
-- ✅ Status management (open → investigating → resolved)
-- ✅ Timeline of events
-- ✅ Incident correlation
+- ✅ Real-time incident tracking & prioritization
+- ✅ Automatic status management (open → investigating → resolved)
+- ✅ Incident correlation (linking logs, metrics, and changes)
+- ✅ High-fidelity timeline of all events
 
-### 📊 SLO Monitoring
-- ✅ Define and track Service Level Objectives
-- ✅ Error budget calculations
-- ✅ SLO compliance reporting
-- ✅ Historical trend analysis
+### 🤖 Autonomous Investigation (ARA)
+- ✅ Multi-phase automated workflows (Metrics -> Logs -> Infrastructure)
+- ✅ Hypothesis generation with confidence scoring
+- ✅ Automated investigation steps & recommended fixes
+- ✅ Real-time investigation logs broadcasted via WebSocket
 
-### 🔍 Investigation & Analysis
-- ✅ Guided RCA workflows
-- ✅ Timeline visualization
-- ✅ Log and metric correlation
-- ✅ Service dependency mapping
+### 🚨 Smart Detection
+- ✅ **Statistical Anomaly Detection**: Z-Score based outlier detection
+- ✅ **Pattern Matching**: LogQL-based search for error signatures
+- ✅ **Infrastructure Scanning**: Real-time detection of CrashLoopBackOffs
+- ✅ **Chaos Testing UI**: Built-in endpoints to verify detection rules
 
-### 🌐 Multi-Tenant Support
-- ✅ Organization-based access control
-- ✅ Service-scoped incidents
-- ✅ Custom alert routing
-
-### 🔔 Real-time Updates
-- ✅ WebSocket-based notifications
-- ✅ Live incident feeds
-- ✅ Automatic UI synchronization
+### � SLO Monitoring
+- ✅ High-precision SLO calculation using PromQL
+- ✅ Real-time Error Budget monitoring
+- ✅ Historical compliance and reliability trends
+- ✅ Automated "Burndown" alerts for budget consumption
 
 ---
 
@@ -235,16 +231,19 @@ src/
 └── utils/                  # Utilities
 
 backend/
-├── main.go                 # Route configuration
-├── handlers/               # HTTP handlers
-├── services/               # Business logic
-├── models/                 # Data models
-├── middleware/             # CORS, Auth, Logging
-├── clients/                # External integrations
+├── main.go                     # Combined Server, Routing & Middleware
+├── detection/                  # Anomaly & Pattern Detection Engine
+├── correlation/                # Multi-source Root Cause Correlation
+├── services/                   # Business Intelligence Layer
+│   ├── ara_orchestrator.go     # Autonomous Agent Brain
+│   ├── slo_service.go          # High-precision SLO Engine
+│   ├── intelligence_service.go # Insight & Fix Generation
+│   └── remediation_service.go  # Self-healing Actions
+├── clients/                    # Telemetry & K8s Clients
 │   ├── prometheus.go
 │   ├── loki.go
 │   └── kubernetes.go
-└── database/               # PostgreSQL
+└── database/                   # Schema & Persistence
 ```
 
 ---
@@ -328,46 +327,33 @@ services:
 
 Navigate to: `http://localhost:3000/a/sarika-reliability-studio-app`
 
-### 2. View Incident Control Room
+### 2. Testing Autonomous Workflows (The "Magic Moment")
 
-- **Sidebar:** Lists all active incidents
-- **Service Filter:** Filter by service
-- **Incident Details:** Click incident to view details
-- **Timeline:** See chronological events
-- **Telemetry Tabs:** View metrics, logs, traces
+Reliability Studio includes a built-in Chaos Engineering utility to verify detection and ARA behavior.
 
-### 3. Create Incidents
-
-Via API:
+**Step A: Simulate a failure**
+This call generates high error rates (30%) and warning logs for the payment service:
 ```bash
-curl -X POST http://localhost:9000/api/incidents \
-  -H "Content-Type: application/json" \
-  -d '{
-    "title": "High latency in payment service",
-    "service": "payment-service",
-    "severity": "critical",
-    "description": "P99 latency > 5s"
-  }'
+curl -X POST http://localhost:9000/api/test/fail
 ```
 
-### 4. Track SLOs
-
-- Go to SLO view
-- Define SLO targets (e.g., 99.9% availability)
-- Monitor error budget consumption
-- View compliance trends
-
-### 5. Generate Test Data
-
+**Step B: Watch detection**
+The `IncidentDetector` (running every 30s) will detect the anomaly and create a "Critical" incident. Watch the live feed in the Grafana UI or check the database:
 ```bash
-cd /home/sarika/Reliability-Studio1
-
-# Generate test incidents
-./generate-test-incidents.sh
-
-# Generate traffic (triggers detection)
-./generate-traffic.sh 60
+curl -s http://localhost:9000/api/incidents | jq .
 ```
+
+**Step C: Observe ARA Investigation**
+The backend will automatically launch the **Autonomous Reliability Agent (ARA)**. You will see real-time updates as ARA:
+1. Analyzes Prometheus metrics.
+2. Scans Loki for the "Database connection timeout" pattern.
+3. Checks Kubernetes for pod restarts.
+4. Generates a hypothesis with ~90% confidence.
+
+### 3. SLO Tracking & Management
+- Go to the **SLO Dashboard** to view current compliance.
+- The system will automatically calculate Availability, Latency, and Error Rate SLOs based on the Prometheus queries defined in the DB.
+- View real-time **Error Budget** burndown during the `/api/test/fail` test.
 
 ---
 
@@ -679,22 +665,18 @@ This project is licensed under the **MIT License** - see [LICENSE](LICENSE) file
 ## 🎯 Roadmap
 
 ### Current (v1.0.0)
-- ✅ Incident management
-- ✅ SLO tracking
-- ✅ Real-time updates
-- ✅ Basic investigation workflows
+- ✅ Autonomous Reliability Agent (ARA)
+- ✅ Z-Score Statistical Anomaly Detection
+- ✅ High-Precision PromQL SLO Engine
+- ✅ Multi-source Root Cause Correlation
+- ✅ Real-time WebSocket Live Feed
+- ✅ Automatic Incident Life-cycle (Detection -> Investigation -> RCA)
 
-### Planned (v1.1.0)
-- 🔄 Advanced correlation analysis
-- 🔄 Machine learning-based detection
-- 🔄 Custom alert integrations
-- 🔄 Multi-tenant enhancements
-
-### Future (v2.0.0)
-- 🔮 Mobile app support
-- 🔮 Advanced analytics
-- 🔮 AI-powered RCA
-- 🔮 Kubernetes-native deployment
+### Next Phase (v1.1.0)
+- 🔄 Machine learning-based forecasting
+- 🔄 Advanced "What-if" analysis for change impact
+- 🔄 Automated Rollback integration (Argo/Flux)
+- 🔄 Multi-cluster Reliability Control Plane support
 
 ---
 

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math"
 	"strings"
 	"sync"
 	"time"
@@ -101,6 +102,15 @@ func (d *IncidentDetector) Start(ctx context.Context, interval time.Duration) {
 	d.logger.Printf("Starting incident detection with interval %v\n", interval)
 
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				d.logger.Printf("FATAL: Detector goroutine panicked: %v. Restarting in 1 minute...", r)
+				d.running = false
+				time.Sleep(1 * time.Minute)
+				d.Start(ctx, interval)
+			}
+		}()
+
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 
@@ -282,40 +292,165 @@ func (d *IncidentDetector) evaluateThresholdRule(ctx context.Context, rule Detec
 
 // evaluateAnomalyRule detects statistical anomalies in metrics
 func (d *IncidentDetector) evaluateAnomalyRule(ctx context.Context, rule DetectionRule) ([]DetectionEvent, error) {
-	// Placeholder for anomaly detection
-	// This would use statistical methods like z-score, isolation forest, etc.
-	return []DetectionEvent{}, nil
+	events := make([]DetectionEvent, 0)
+	
+	// establish baseline: last 1 hour of data
+	end := time.Now()
+	start := end.Add(-1 * time.Hour)
+	step := 1 * time.Minute
+	
+	resp, err := d.promClient.QueryRange(ctx, rule.Query, start, end, step)
+	if err != nil {
+		d.logger.Printf("Failed to query baseline for anomaly rule %s: %v\n", rule.Name, err)
+		return nil, nil // Non-fatal
+	}
+	
+	if len(resp.Data.Result) == 0 {
+		return nil, nil
+	}
+	
+	for _, result := range resp.Data.Result {
+		values := []float64{}
+		for _, v := range result.Values {
+			if len(v) < 2 { continue }
+			valStr, _ := v[1].(string)
+			var val float64
+			if _, err := fmt.Sscanf(valStr, "%f", &val); err == nil {
+				values = append(values, val)
+			}
+		}
+		
+		if len(values) < 10 { // Not enough points for stable baseline
+			continue
+		}
+		
+		// Basic statistical analysis
+		var sum, sumSq float64
+		for _, v := range values {
+			sum += v
+			sumSq += v * v
+		}
+		count := float64(len(values))
+		mean := sum / count
+		variance := (sumSq / count) - (mean * mean)
+		if variance < 0 { variance = 0 }
+		stddev := math.Sqrt(variance)
+		
+		// Use latest value as current
+		if len(values) > 0 {
+			currentValue := values[len(values)-1]
+			
+			// Calculate Z-score (how many stddevs from mean)
+			zScore := 0.0
+			if stddev > 0 {
+				zScore = math.Abs(currentValue - mean) / stddev
+			}
+			
+			// Use rule's threshold_value as anomaly sensitivity (default to 3.0)
+			sensitivity := rule.ThresholdValue
+			if sensitivity <= 0 { sensitivity = 3.0 }
+			
+			if zScore > sensitivity {
+				serviceName := result.Metric["service"]
+				if serviceName == "" { serviceName = "unknown" }
+				
+				d.logger.Printf("🚨 ANOMALY DETECTED: Rule=%s, Service=%s, Value=%.4f, Mean=%.4f, StdDev=%.4f, Z-Score=%.2f\n",
+					rule.Name, serviceName, currentValue, mean, stddev, zScore)
+					
+				events = append(events, DetectionEvent{
+					RuleID:    rule.ID,
+					RuleName:  rule.Name,
+					ServiceID: serviceName,
+					Severity:  rule.Severity,
+					Value:     currentValue,
+					Timestamp: time.Now(),
+					Metadata: map[string]interface{}{
+						"type":      "z_score_anomaly",
+						"z_score":   zScore,
+						"mean":      mean,
+						"stddev":    stddev,
+						"baseline":  "1h",
+					},
+					Evidence: []string{
+						fmt.Sprintf("Metric value %.4f is statistically anomalous (Z-score: %.2f)", currentValue, zScore),
+						fmt.Sprintf("Baseline (last 1h): mean=%.4f, stddev=%.4f", mean, stddev),
+					},
+				})
+			}
+		}
+	}
+	
+	return events, nil
 }
 
 // evaluatePatternRule detects specific patterns (e.g., pod crashes, log spikes)
 func (d *IncidentDetector) evaluatePatternRule(ctx context.Context, rule DetectionRule) (*DetectionEvent, error) {
-	// Check for pod crashes
-	if rule.Name == "Pod Crash Loop" {
-		crashingPods := 0
+	// 1. Check for Pod Crash Loops (Kubernetes integration)
+	if strings.Contains(strings.ToLower(rule.Name), "pod crash") || strings.Contains(strings.ToLower(rule.Query), "crashloop") {
 		if d.k8sClient != nil {
-			pods, err := d.k8sClient.GetPods(ctx, "default", "all")
+			pods, err := d.k8sClient.GetPods(ctx, "default", "") // Scan all pods in default namespace
 			if err == nil {
+				crashingCount := 0
+				crashingPodNames := []string{}
+				
 				for _, pod := range pods {
-					if pod.Status == "CrashLoopBackOff" {
-						crashingPods++
+					if strings.Contains(pod.Status, "CrashLoopBackOff") || strings.Contains(pod.Status, "Error") {
+						crashingCount++
+						crashingPodNames = append(crashingPodNames, pod.Name)
 					}
+				}
+				
+				if crashingCount > 0 {
+					return &DetectionEvent{
+						RuleID:    rule.ID,
+						RuleName:  rule.Name,
+						ServiceID: "kubernetes-cluster", // Cluster-wide issue
+						Severity:  rule.Severity,
+						Value:     float64(crashingCount),
+						Timestamp: time.Now(),
+						Metadata: map[string]interface{}{
+							"pod_count": crashingCount,
+							"affected_pods": crashingPodNames,
+						},
+						Evidence: []string{
+							fmt.Sprintf("Detected %d pods in CrashLoopBackOff or Error state", crashingCount),
+							fmt.Sprintf("Affected pods: %s", strings.Join(crashingPodNames, ", ")),
+						},
+					}, nil
 				}
 			}
 		}
+	}
 
-		if crashingPods > 0 {
+	// 2. Check for Log Pattern Spikes (Loki integration)
+	if rule.RuleType == "pattern" && !strings.Contains(rule.Name, "Pod") {
+		// Use Loki to count occurrences of the pattern
+		lokiQuery := rule.Query 
+		if !strings.Contains(lokiQuery, "{") {
+			// Not a full LogQL query, wrap it
+			lokiQuery = fmt.Sprintf(`{service=~".+"} |= "%s"`, rule.Query)
+			if rule.ServiceID != nil {
+				// We'd need to lookup the service name from ID here if we wanted to be more precise
+				// For now, use global search if no service specified in query
+			}
+		}
+		
+		entries, err := d.lokiClient.QueryLogs(ctx, lokiQuery, time.Now().Add(-5*time.Minute), time.Now(), 1000)
+		if err == nil && float64(len(entries)) >= rule.ThresholdValue {
 			return &DetectionEvent{
 				RuleID:    rule.ID,
 				RuleName:  rule.Name,
-				ServiceID: "kubernetes",
+				ServiceID: "multi-service",
 				Severity:  rule.Severity,
-				Value:     float64(crashingPods),
+				Value:     float64(len(entries)),
 				Timestamp: time.Now(),
 				Metadata: map[string]interface{}{
-					"pod_count": crashingPods,
+					"log_query": lokiQuery,
+					"matched_count": len(entries),
 				},
 				Evidence: []string{
-					fmt.Sprintf("Detected %d pods in CrashLoopBackOff", crashingPods),
+					fmt.Sprintf("Log pattern match: found %d occurrences in the last 5 minutes", len(entries)),
+					fmt.Sprintf("Query: %s", lokiQuery),
 				},
 			}, nil
 		}
@@ -473,6 +608,11 @@ func (d *IncidentDetector) processDetectionEvent(ctx context.Context, event Dete
 	// Trigger correlation if callback is set
 	if d.correlationCallback != nil {
 		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					d.logger.Printf("ERROR: Correlation goroutine panicked for incident %s: %v", incidentID, r)
+				}
+			}()
 			correlationCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
 			d.correlationCallback(correlationCtx, incidentID.String(), serviceName, event.Timestamp)

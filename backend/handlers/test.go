@@ -9,6 +9,7 @@ import (
 	"math"
 	"math/rand"
 	"net/http"
+	"sync"
 )
 
 // TestLoadRequest defines the payload for load injection
@@ -42,6 +43,13 @@ type TestEndpointDependencies struct {
 }
 
 var testDeps *TestEndpointDependencies
+
+var (
+	// requestCounters stores the total count of requests per service+status
+	// Key format: "service|status"
+	requestCounters = make(map[string]float64)
+	countersMutex   sync.Mutex
+)
 
 // InitTestHandlers initializes test endpoint dependencies
 func InitTestHandlers(promClient *clients.PrometheusClient, lokiClient *clients.LokiClient, incService *services.IncidentService, sloService *services.SLOService, _ interface{}) {
@@ -154,28 +162,37 @@ func HandleTestFail(w http.ResponseWriter, r *http.Request) {
 	log.Printf("❌ Injecting failures: service=%s, error_rate=%.1f%%, total_requests=%d, errors=%d", 
 		req.Service, req.ErrorRate*100, totalRequests, errorsGenerated)
 
-	// Push failed request metrics - CRITICAL: Use http_requests_total with status=5xx
-	// This matches what the detector queries for error rate calculation
+	// Update monotonic counters
+	countersMutex.Lock()
+	successKey := req.Service + "|200"
+	failureKey := req.Service + "|500"
 	
-	// Push successful requests first
+	requestCounters[successKey] += float64(totalRequests - errorsGenerated)
+	requestCounters[failureKey] += float64(errorsGenerated)
+	
+	currentSuccess := requestCounters[successKey]
+	currentFailure := requestCounters[failureKey]
+	countersMutex.Unlock()
+
+	// Push successful requests
 	successLabels := map[string]string{
 		"service":     req.Service,
 		"environment": "test",
 		"method":      "GET",
 		"status":      "200",
 	}
-	if err := testDeps.promClient.PushCounter(ctx, "http_requests_total", float64(totalRequests-errorsGenerated), successLabels); err != nil {
+	if err := testDeps.promClient.PushCounter(ctx, "http_requests_total", currentSuccess, successLabels); err != nil {
 		log.Printf("⚠️  Failed to push success metric to Prometheus: %v", err)
 	}
 
-	// Push failed requests with 5xx status codes
+	// Push failed requests
 	failureLabels := map[string]string{
 		"service":     req.Service,
 		"environment": "test",
 		"method":      "GET",
 		"status":      "500",
 	}
-	if err := testDeps.promClient.PushCounter(ctx, "http_requests_total", float64(errorsGenerated), failureLabels); err != nil {
+	if err := testDeps.promClient.PushCounter(ctx, "http_requests_total", currentFailure, failureLabels); err != nil {
 		log.Printf("⚠️  Failed to push failure metric to Prometheus: %v", err)
 	}
 	

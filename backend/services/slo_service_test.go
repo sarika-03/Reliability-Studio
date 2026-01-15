@@ -9,6 +9,12 @@ import (
 	"github.com/sarika-03/Reliability-Studio/clients"
 )
 
+// PrometheusQueryClient defines the interface for mocking (locally defined for test)
+type PrometheusQueryClient interface {
+	Query(ctx context.Context, query string, timestamp time.Time) (*clients.PrometheusResponse, error)
+	QueryRange(ctx context.Context, query string, start, end time.Time, step time.Duration) (*clients.PrometheusResponse, error)
+}
+
 // MockPrometheusClient implements PrometheusQueryClient
 type MockPrometheusClient struct {
 	QueryFunc func(ctx context.Context, query string, timestamp time.Time) (*clients.PrometheusResponse, error)

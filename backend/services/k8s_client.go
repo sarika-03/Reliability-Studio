@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"go.uber.org/zap"
 	"os/exec"
 	"time"
@@ -12,9 +13,12 @@ type K8sClient struct {
 	logger *zap.Logger
 }
 
-func NewK8sClient() *K8sClient {
+func NewK8sClient(logger *zap.Logger) *K8sClient {
+	if logger == nil {
+		logger = zap.L()
+	}
 	return &K8sClient{
-		logger: zap.L(),
+		logger: logger,
 	}
 }
 
@@ -140,4 +144,32 @@ func (k *K8sClient) GetEvents(ctx context.Context, namespace string) ([]map[stri
 	}
 
 	return response.Items, nil
+}
+// RestartDeployment performs a rollout restart of a deployment
+func (k *K8sClient) RestartDeployment(ctx context.Context, namespace, deploymentName string) error {
+	cmd := exec.CommandContext(ctx, "kubectl", "rollout", "restart", "deployment", deploymentName, "-n", namespace)
+	err := cmd.Run()
+	if err != nil {
+		k.logger.Error("Failed to restart deployment",
+			zap.String("deployment", deploymentName),
+			zap.String("namespace", namespace),
+			zap.Error(err))
+		return err
+	}
+	return nil
+}
+
+// ScaleDeployment scales a deployment to a specified number of replicas
+func (k *K8sClient) ScaleDeployment(ctx context.Context, namespace, deploymentName string, replicas int) error {
+	cmd := exec.CommandContext(ctx, "kubectl", "scale", "deployment", deploymentName, "--replicas", fmt.Sprintf("%d", replicas), "-n", namespace)
+	err := cmd.Run()
+	if err != nil {
+		k.logger.Error("Failed to scale deployment",
+			zap.String("deployment", deploymentName),
+			zap.String("namespace", namespace),
+			zap.Int("replicas", replicas),
+			zap.Error(err))
+		return err
+	}
+	return nil
 }

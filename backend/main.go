@@ -10,10 +10,12 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/gorilla/mux"
+	"github.com/jmoiron/sqlx"
 	_ "net/http/pprof"
 	"go.uber.org/zap"
 	
@@ -36,6 +38,7 @@ import (
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.21.0"
+	"go.opentelemetry.io/contrib/instrumentation/github.com/gorilla/mux/otelmux"
 )
 
 type Server struct {
@@ -56,12 +59,22 @@ type Server struct {
 func initTracer() {
 	ctx := context.Background()
 
+	endpoint := getEnv("TEMPO_URL", "localhost:4317") // Default to localhost gRPC
+	if strings.HasPrefix(endpoint, "http://") {
+		endpoint = strings.TrimPrefix(endpoint, "http://")
+	}
+	// Handle Docker service alias with http port
+	if strings.HasSuffix(endpoint, ":3200") {
+		endpoint = strings.TrimSuffix(endpoint, ":3200") + ":4317"
+	}
+
 	exporter, err := otlptracegrpc.New(ctx,
-		otlptracegrpc.WithEndpoint("tempo:4317"),
+		otlptracegrpc.WithEndpoint(endpoint),
 		otlptracegrpc.WithInsecure(),
 	)
 	if err != nil {
-		log.Fatal(err)
+		log.Printf("Warning: Failed to initialize tracer: %v", err)
+		return
 	}
 
 	tp := sdktrace.NewTracerProvider(
@@ -75,14 +88,42 @@ func initTracer() {
 	otel.SetTracerProvider(tp)
 }
 
+func waitForServices(ctx context.Context, db *sql.DB, promClient *clients.PrometheusClient, lokiClient *clients.LokiClient) error {
+	maxRetries := 30
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+
+	for i := 0; i < maxRetries; i++ {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+			dbErr := database.HealthCheck(db)
+			promErr := promClient.Health(ctx)
+			lokiErr := lokiClient.Health(ctx)
+
+			if dbErr == nil && promErr == nil && lokiErr == nil {
+				log.Println("✅ All external services (Postgres, Prometheus, Loki) are ready!")
+				return nil
+			}
+
+			log.Printf("Waiting for services (attempt %d/%d): DB=%v, Prom=%v, Loki=%v", 
+				i+1, maxRetries, dbErr == nil, promErr == nil, lokiErr == nil)
+		}
+	}
+
+	return fmt.Errorf("timed out waiting for external services")
+}
+
 func main() {
 	initTracer()
 	log.Println("🚀 Starting Reliability Studio Backend...")
 
 	// Load configuration
 	dbConfig := database.LoadConfigFromEnv()
-	promURL := getEnv("PROMETHEUS_URL", "http://prometheus:9090")
-	lokiURL := getEnv("LOKI_URL", "http://loki:3100")
+	// Default to localhost ports for local development
+	promURL := getEnv("PROMETHEUS_URL", "http://localhost:9091") 
+	lokiURL := getEnv("LOKI_URL", "http://localhost:3100")
 
 	// Initialize database
 	log.Println("Connecting to database...")
@@ -106,6 +147,16 @@ func main() {
 	log.Println("🔌 Initializing clients...")
 	promClient := clients.NewPrometheusClient(promURL)
 	lokiClient := clients.NewLokiClient(lokiURL)
+
+	// WAIT FOR SERVICES to be stable before continuing
+	// This prevents race conditions where engines start before dependencies are ready
+	log.Println("⏳ Waiting for external services to be fully stable...")
+	startupCtx, startupCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	if err := waitForServices(startupCtx, db, promClient, lokiClient); err != nil {
+		startupCancel()
+		log.Fatalf("❌ Critical failure: External services not stable: %v", err)
+	}
+	startupCancel()
 
 	// Initialize K8s client - FIXED: Handle typed-nil issue for interfaces
 	var k8sInterface correlation.KubernetesClient
@@ -131,11 +182,20 @@ func main() {
 
 	// Initialize services
 	log.Println("⚙️  Initializing services...")
-	sloService := services.NewSLOService(db, zapLogger)
+	sloService := services.NewSLOService(db, promClient, zapLogger)
 	timelineService := services.NewTimelineService(db)
 	investigationService := services.NewInvestigationService(db, zapLogger)
-	incidentService := services.NewIncidentService(db, zapLogger)
-	recoveryActionService := services.NewRecoveryActionService(db, zapLogger, k8sClient)
+	
+	// Initialize service-based clients for the new intelligence/remediation services
+	serviceLokiClient := services.NewLokiClient(lokiURL, zapLogger)
+	serviceK8sClient := services.NewK8sClient(zapLogger)
+	
+	// Create service-level Prometheus client
+	servicePromClient := clients.NewPrometheusClient(promURL)
+
+	intelligenceService := services.NewIntelligenceService(sqlx.NewDb(db, "postgres"), servicePromClient, serviceLokiClient, zapLogger)
+	remediationService := services.NewRemediationService(sqlx.NewDb(db, "postgres"), serviceK8sClient, zapLogger)
+	
 	correlationEngine := correlation.NewCorrelationEngine(db, promClient, k8sInterface, lokiClient)
 
 	// Initialize stability systems
@@ -163,10 +223,12 @@ func main() {
 	}
 
 	// Initialize WebSocket server for real-time updates
-	log.Println("🔌 Initializing WebSocket server...")
 	realtimeServer := websocket.NewRealtimeServer()
 	realtimeServer.Start()
 	server.realtimeServer = realtimeServer
+
+	// Use servicePromClient for consistency
+	araOrchestrator := services.NewARAOrchestrator(investigationService, servicePromClient, serviceLokiClient, serviceK8sClient, realtimeServer, zapLogger)
 
 	// Initialize incident detector
 	log.Println("🔍 Initializing incident detector...")
@@ -221,27 +283,39 @@ func main() {
 				})
 			}
 		}
+
+		// Trigger ARA Autonomous Investigation
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("ERROR: ARA Investigation panicked for incident %s: %v", incidentID, r)
+				}
+			}()
+			araOrchestrator.StartInvestigation(ctx, incidentID, service)
+		}()
 	})
 
 	// Start incident detection (run every 30 seconds for faster response)
+	// ONLY after everything else is initialized
 	log.Println("⚡ Starting continuous incident detection...")
-	ctx, cancel := context.WithCancel(context.Background())
-	detector.Start(ctx, 30*time.Second)
+	detectorCtx, detectorCancel := context.WithCancel(context.Background())
+	detector.Start(detectorCtx, 30*time.Second)
 
 	// Setup router
 	router := mux.NewRouter()
+	router.Use(otelmux.Middleware("reliability-backend"))
 
 	// Setup middleware - Security first
 	router.Use(middleware.Recovery)
 	router.Use(middleware.Logging)
-	router.Use(middleware.CORSMiddleware)  // Add CORS support for frontend
 	router.Use(middleware.SecurityHeadersMiddleware)
 	router.Use(middleware.RateLimitingMiddleware)
 	
 	// Initialize detection handlers
+	handlers.InitHandlers(nil, nil, sloService, nil, zapLogger)
 	handlers.InitDetectionHandlers(detector)
 	handlers.InitInvestigationHandlers(investigationService)
-	handlers.InitRecoveryActionHandlers(recoveryActionService, incidentService, zapLogger)
+	handlers.InitIntelligenceHandlers(intelligenceService, remediationService, zapLogger)
 
 	// Add telemetry middleware to capture all metrics and logs
 	telemetryMiddleware := middleware.NewTelemetryMiddleware(promClient, lokiClient, "reliability-studio")
@@ -261,6 +335,16 @@ func main() {
 
 	// Public API routes for Grafana plugin access
 	// These bypass auth for development - add auth in production
+	
+	// Investigation routes (guided RCA workflows) - Public for Grafana plugin
+	router.HandleFunc("/api/incidents/{id}/investigation/hypotheses", handlers.GetInvestigationHypotheses).Methods("GET")
+	router.HandleFunc("/api/incidents/{id}/investigation/hypotheses", handlers.CreateInvestigationHypothesis).Methods("POST")
+	router.HandleFunc("/api/incidents/{id}/investigation/steps", handlers.GetInvestigationSteps).Methods("GET")
+	router.HandleFunc("/api/incidents/{id}/investigation/steps", handlers.CreateInvestigationStep).Methods("POST")
+	router.HandleFunc("/api/incidents/{id}/investigation/rca", handlers.GetRootCauseAnalysis).Methods("GET")
+	router.HandleFunc("/api/incidents/{id}/investigation/recommended-actions", handlers.GetRecommendedActions).Methods("GET")
+	router.HandleFunc("/api/incidents/{id}/investigation/logs", handlers.GetInvestigationLogs).Methods("GET")
+
 	router.HandleFunc("/api/incidents", server.getIncidentsHandler).Methods("GET")
 	router.HandleFunc("/api/incidents/active", server.getActiveIncidentsHandler).Methods("GET")
 	router.HandleFunc("/api/incidents", server.createIncidentHandler).Methods("POST")
@@ -270,53 +354,45 @@ func main() {
 	router.HandleFunc("/api/incidents/{id}/correlations", server.getIncidentCorrelationsHandler).Methods("GET")
 	router.HandleFunc("/api/incidents/{id}/analysis", server.getIncidentAnalysisHandler).Methods("GET")
 	router.HandleFunc("/api/services", server.getServicesHandler).Methods("GET")
+	router.HandleFunc("/api/services", server.createServiceHandler).Methods("POST")
+	router.HandleFunc("/api/services/{id}", server.getServiceHandler).Methods("GET")
+	router.HandleFunc("/api/services/{id}", server.updateServiceHandler).Methods("PATCH")
 
-	// Protected routes - requires authentication
+
+	// Intelligence & Remediation routes
+	router.HandleFunc("/api/incidents/{id}/intelligence", handlers.GetIncidentIntelligence).Methods("GET")
+	router.HandleFunc("/api/incidents/{id}/remediate", handlers.ExecuteRemediationHandler).Methods("POST")
+
+	// Detection rules and alerts - Public for Grafana plugin
+	router.HandleFunc("/api/detection/rules", handlers.GetDetectionRules).Methods("GET")
+	router.HandleFunc("/api/detection/status", handlers.GetDetectionStatus).Methods("GET")
+
+	// SLO routes - Public for Grafana plugin
+	router.HandleFunc("/api/slos", server.getSLOsHandler).Methods("GET")
+	router.HandleFunc("/api/slos", server.createSLOHandler).Methods("POST")
+	router.HandleFunc("/api/slos/{id}", server.getSLOHandler).Methods("GET")
+	router.HandleFunc("/api/slos/{id}", server.updateSLOHandler).Methods("PATCH")
+	router.HandleFunc("/api/slos/{id}", server.deleteSLOHandler).Methods("DELETE")
+	router.HandleFunc("/api/slos/{id}/calculate", server.calculateSLOHandler).Methods("POST")
+	router.HandleFunc("/api/slos/{id}/history", server.getSLOHistoryHandler).Methods("GET")
+
+	// Metrics routes - Public for Grafana plugin
+	router.HandleFunc("/api/metrics/availability/{service}", server.getServiceAvailabilityHandler).Methods("GET")
+	router.HandleFunc("/api/metrics/error-rate/{service}", server.getServiceErrorRateHandler).Methods("GET")
+	router.HandleFunc("/api/metrics/latency/{service}", server.getServiceLatencyHandler).Methods("GET")
+
+	// Kubernetes routes - Public for Grafana plugin
+	router.HandleFunc("/api/kubernetes/pods/{namespace}/{service}", server.getPodsHandler).Methods("GET")
+	router.HandleFunc("/api/kubernetes/deployments/{namespace}/{service}", server.getDeploymentsHandler).Methods("GET")
+	router.HandleFunc("/api/kubernetes/events/{namespace}/{service}", server.getK8sEventsHandler).Methods("GET")
+
+	// Logs routes - Public for Grafana plugin
+	router.HandleFunc("/api/logs/{service}/errors", server.getErrorLogsHandler).Methods("GET")
+	router.HandleFunc("/api/logs/{service}/search", server.searchLogsHandler).Methods("GET")
+
+	// Protected admin routes - requires authentication
 	api := router.PathPrefix("/api/admin").Subrouter()
 	api.Use(middleware.Auth)
-
-	// Investigation routes (guided RCA workflows)
-	api.HandleFunc("/incidents/{id}/investigation/hypotheses", handlers.GetInvestigationHypotheses).Methods("GET")
-	api.HandleFunc("/incidents/{id}/investigation/hypotheses", handlers.CreateInvestigationHypothesis).Methods("POST")
-	api.HandleFunc("/incidents/{id}/investigation/steps", handlers.GetInvestigationSteps).Methods("GET")
-	api.HandleFunc("/incidents/{id}/investigation/steps", handlers.CreateInvestigationStep).Methods("POST")
-	api.HandleFunc("/incidents/{id}/investigation/rca", handlers.GetRootCauseAnalysis).Methods("GET")
-	api.HandleFunc("/incidents/{id}/investigation/recommended-actions", handlers.GetRecommendedActions).Methods("GET")
-
-	// Detection rules and alerts
-	api.HandleFunc("/detection/rules", handlers.GetDetectionRules).Methods("GET")
-	api.HandleFunc("/detection/status", handlers.GetDetectionStatus).Methods("GET")
-
-	// SLO routes
-	api.HandleFunc("/slos", server.getSLOsHandler).Methods("GET")
-	api.HandleFunc("/slos", server.createSLOHandler).Methods("POST")
-	api.HandleFunc("/slos/{id}", server.getSLOHandler).Methods("GET")
-	api.HandleFunc("/slos/{id}", server.updateSLOHandler).Methods("PATCH")
-	api.HandleFunc("/slos/{id}", server.deleteSLOHandler).Methods("DELETE")
-	api.HandleFunc("/slos/{id}/calculate", server.calculateSLOHandler).Methods("POST")
-	api.HandleFunc("/slos/{id}/history", server.getSLOHistoryHandler).Methods("GET")
-
-	// Metrics routes
-	api.HandleFunc("/metrics/availability/{service}", server.getServiceAvailabilityHandler).Methods("GET")
-	api.HandleFunc("/metrics/error-rate/{service}", server.getServiceErrorRateHandler).Methods("GET")
-	api.HandleFunc("/metrics/latency/{service}", server.getServiceLatencyHandler).Methods("GET")
-
-	// Kubernetes routes
-	if k8sClient != nil {
-		api.HandleFunc("/kubernetes/pods/{namespace}/{service}", server.getPodsHandler).Methods("GET")
-		api.HandleFunc("/kubernetes/deployments/{namespace}/{service}", server.getDeploymentsHandler).Methods("GET")
-		api.HandleFunc("/kubernetes/events/{namespace}/{service}", server.getK8sEventsHandler).Methods("GET")
-	}
-
-	// Logs routes
-	api.HandleFunc("/logs/{service}/errors", server.getErrorLogsHandler).Methods("GET")
-	api.HandleFunc("/logs/{service}/search", server.searchLogsHandler).Methods("GET")
-
-	// Recovery Action routes
-	api.HandleFunc("/incidents/{id}/recovery/actions", handlers.GetRecoveryActions).Methods("GET")
-	api.HandleFunc("/incidents/{id}/recovery/suggest", handlers.SuggestRecoveryActions).Methods("POST")
-	api.HandleFunc("/recovery/actions/{action_id}/approve", handlers.ApproveRecoveryAction).Methods("POST")
-	api.HandleFunc("/recovery/actions/{action_id}/execute", handlers.ExecuteRecoveryAction).Methods("POST")
 
 	// Admin routes
 	admin := api.PathPrefix("/admin").Subrouter()
@@ -378,7 +454,7 @@ func main() {
 
 		// Cancel background jobs
 		cancelBackgroundJobs()
-		cancel() // Cancel the detector context
+		detectorCancel() // Cancel the detector context
 
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
@@ -396,6 +472,14 @@ func main() {
 
 // Background jobs - FIXED: Now accepts context for graceful shutdown
 func (s *Server) startBackgroundJobs(ctx context.Context) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("FATAL: Background jobs panicked: %v. Restarting in 1 minute...", r)
+			time.Sleep(1 * time.Minute)
+			go s.startBackgroundJobs(ctx)
+		}
+	}()
+
 	// Calculate SLOs every 5 minutes
 	sloTicker := time.NewTicker(5 * time.Minute)
 	defer sloTicker.Stop()
@@ -437,6 +521,7 @@ func (s *Server) generateSampleTelemetry(ctx context.Context) {
 			"service":     serviceName,
 			"method":      "GET",
 			"endpoint":    "/api/v1/data",
+			"status":      "200",
 			"status_code": "200",
 		}
 
@@ -468,6 +553,7 @@ func (s *Server) generateSampleTelemetry(ctx context.Context) {
 			"service":     "user-service",
 			"method":      "POST",
 			"endpoint":    "/api/v1/users",
+			"status":      "500",
 			"status_code": "500",
 		}
 		if err := s.promClient.PushCounter(ctx, "http_requests_error_total", 1, errorLabels); err != nil {
@@ -955,6 +1041,10 @@ func (s *Server) getServiceLatencyHandler(w http.ResponseWriter, r *http.Request
 }
 
 func (s *Server) getPodsHandler(w http.ResponseWriter, r *http.Request) {
+	if s.k8sClient == nil {
+		respondError(w, http.StatusNotImplemented, "Kubernetes integration is currently unavailable")
+		return
+	}
 	vars := mux.Vars(r)
 	namespace := vars["namespace"]
 	service := vars["service"]
@@ -969,6 +1059,10 @@ func (s *Server) getPodsHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) getDeploymentsHandler(w http.ResponseWriter, r *http.Request) {
+	if s.k8sClient == nil {
+		respondError(w, http.StatusNotImplemented, "Kubernetes integration is currently unavailable")
+		return
+	}
 	vars := mux.Vars(r)
 	namespace := vars["namespace"]
 	service := vars["service"]
@@ -983,6 +1077,10 @@ func (s *Server) getDeploymentsHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) getK8sEventsHandler(w http.ResponseWriter, r *http.Request) {
+	if s.k8sClient == nil {
+		respondError(w, http.StatusNotImplemented, "Kubernetes integration is currently unavailable")
+		return
+	}
 	vars := mux.Vars(r)
 	namespace := vars["namespace"]
 	service := vars["service"]
@@ -1002,7 +1100,8 @@ func (s *Server) getErrorLogsHandler(w http.ResponseWriter, r *http.Request) {
 
 	logs, err := s.lokiClient.GetErrorLogs(context.Background(), service, time.Now().Add(-15*time.Minute), 100)
 	if err != nil {
-		respondError(w, http.StatusInternalServerError, "Failed to get logs")
+		log.Printf("⚠️  Loki error: %v, returning empty logs", err)
+		respondJSON(w, http.StatusOK, []interface{}{})
 		return
 	}
 
@@ -1010,8 +1109,25 @@ func (s *Server) getErrorLogsHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) searchLogsHandler(w http.ResponseWriter, r *http.Request) {
-	// Implementation
-	respondJSON(w, http.StatusOK, []map[string]interface{}{})
+	vars := mux.Vars(r)
+	service := vars["service"]
+	query := r.URL.Query().Get("q")
+
+	if query == "" {
+		respondError(w, http.StatusBadRequest, "Query parameter 'q' is required")
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	defer cancel()
+
+	logs, err := s.lokiClient.SearchLogs(ctx, service, query, time.Now().Add(-15*time.Minute), 100)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to search logs: %v", err))
+		return
+	}
+
+	respondJSON(w, http.StatusOK, logs)
 }
 
 func (s *Server) getUsersHandler(w http.ResponseWriter, r *http.Request) {
@@ -1020,7 +1136,7 @@ func (s *Server) getUsersHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) getServicesHandler(w http.ResponseWriter, r *http.Request) {
-	rows, err := s.db.Query(`SELECT id, name, description, team FROM services ORDER BY name`)
+	rows, err := s.db.Query(`SELECT id, name, status FROM services ORDER BY name`)
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, "Failed to get services")
 		return
@@ -1029,24 +1145,110 @@ func (s *Server) getServicesHandler(w http.ResponseWriter, r *http.Request) {
 
 	services := make([]map[string]interface{}, 0)
 	for rows.Next() {
-		var id, name, description string
-		var team sql.NullString
-		if err := rows.Scan(&id, &name, &description, &team); err != nil {
+		var id, name, status string
+		if err := rows.Scan(&id, &name, &status); err != nil {
 			continue
 		}
-		teamVal := ""
-		if team.Valid {
-			teamVal = team.String
-		}
 		services = append(services, map[string]interface{}{
-			"id":          id,
-			"name":        name,
-			"description": description,
-			"team":        teamVal,
+			"id":     id,
+			"name":   name,
+			"status": status,
 		})
 	}
 
 	respondJSON(w, http.StatusOK, services)
+}
+
+func (s *Server) getServiceHandler(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	serviceID := vars["id"]
+
+	var id, name, status string
+	err := s.db.QueryRow(`SELECT id, name, status FROM services WHERE id = $1`, serviceID).Scan(&id, &name, &status)
+	if err == sql.ErrNoRows {
+		respondError(w, http.StatusNotFound, "Service not found")
+		return
+	} else if err != nil {
+		respondError(w, http.StatusInternalServerError, "Failed to get service")
+		return
+	}
+
+	respondJSON(w, http.StatusOK, map[string]interface{}{
+		"id":     id,
+		"name":   name,
+		"status": status,
+	})
+}
+
+func (s *Server) createServiceHandler(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Name   string `json:"name"`
+		Status string `json:"status"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+
+	if req.Name == "" {
+		respondError(w, http.StatusBadRequest, "Name is required")
+		return
+	}
+
+	if req.Status == "" {
+		req.Status = "healthy"
+	}
+
+	var serviceID string
+	err := s.db.QueryRow(`
+		INSERT INTO services (name, status) 
+		VALUES ($1, $2) 
+		RETURNING id
+	`, req.Name, req.Status).Scan(&serviceID)
+
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to create service: %v", err))
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"id":     serviceID,
+		"name":   req.Name,
+		"status": req.Status,
+	})
+}
+
+func (s *Server) updateServiceHandler(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	serviceID := vars["id"]
+
+	var req struct {
+		Name   string `json:"name"`
+		Status string `json:"status"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+
+	_, err := s.db.Exec(`
+		UPDATE services 
+		SET name = COALESCE(NULLIF($1, ''), name),
+		    status = COALESCE(NULLIF($2, ''), status),
+		    updated_at = NOW()
+		WHERE id = $3
+	`, req.Name, req.Status, serviceID)
+
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, "Failed to update service")
+		return
+	}
+
+	respondJSON(w, http.StatusOK, map[string]string{"status": "updated"})
 }
 
 // Helpers

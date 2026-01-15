@@ -127,6 +127,15 @@ func (s *RealtimeServer) BroadcastTimelineEvent(event interface{}) {
 	}
 }
 
+// BroadcastARALog broadcasts an ARA log entry to all clients
+func (s *RealtimeServer) BroadcastARALog(log interface{}) {
+	s.broadcast <- &Message{
+		Type:      "ara_log",
+		Payload:   log,
+		Timestamp: getCurrentTimestamp(),
+	}
+}
+
 // BroadcastAlert broadcasts an alert to all clients
 func (s *RealtimeServer) BroadcastAlert(alert interface{}) {
 	s.broadcast <- &Message{
@@ -157,6 +166,20 @@ func (s *RealtimeServer) HandleWebSocket(w http.ResponseWriter, r *http.Request)
 	go client.readPump()
 }
 
+const (
+	// Time allowed to write a message to the peer.
+	writeWait = 10 * time.Second
+
+	// Time allowed to read the next pong message from the peer.
+	pongWait = 60 * time.Second
+
+	// Send pings to peer with this period. Must be less than pongWait.
+	pingPeriod = (pongWait * 9) / 10
+
+	// Maximum message size allowed from peer.
+	maxMessageSize = 512
+)
+
 // readPump reads messages from the client
 func (c *Client) readPump() {
 	defer func() {
@@ -164,9 +187,10 @@ func (c *Client) readPump() {
 		c.conn.Close()
 	}()
 
-	c.conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+	c.conn.SetReadLimit(maxMessageSize)
+	c.conn.SetReadDeadline(time.Now().Add(pongWait))
 	c.conn.SetPongHandler(func(string) error {
-		c.conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+		c.conn.SetReadDeadline(time.Now().Add(pongWait))
 		return nil
 	})
 
@@ -179,26 +203,34 @@ func (c *Client) readPump() {
 			}
 			break
 		}
-		// Echo back the message or handle client commands here if needed
 	}
 }
 
 // writePump writes messages to the client
 func (c *Client) writePump() {
+	ticker := time.NewTicker(pingPeriod)
 	defer func() {
+		ticker.Stop()
 		c.conn.Close()
 	}()
 
 	for {
 		select {
 		case message, ok := <-c.send:
-			c.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+			c.conn.SetWriteDeadline(time.Now().Add(writeWait))
 			if !ok {
+				// The server closed the channel.
 				c.conn.WriteMessage(websocket.CloseMessage, []byte{})
 				return
 			}
 
 			if err := c.conn.WriteJSON(message); err != nil {
+				return
+			}
+
+		case <-ticker.C:
+			c.conn.SetWriteDeadline(time.Now().Add(writeWait))
+			if err := c.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
 				return
 			}
 		}

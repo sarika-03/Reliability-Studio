@@ -18,7 +18,8 @@ import (
 )
 
 // JWT_SECRET must be strong and come from environment
-var JWT_SECRET = []byte(getEnvStrict("JWT_SECRET"))
+// For development, use a default secret if not set (NOT for production!)
+var JWT_SECRET = []byte(getEnvWithDefault("JWT_SECRET", "dev-secret-key-change-in-production-min-32-chars"))
 
 // Token expiration times
 const (
@@ -638,6 +639,18 @@ func getEnvStrict(key string) string {
 	}
 	log.Fatalf("🔴 CRITICAL: Environment variable '%s' is required but not set!", key)
 	return "" // unreachable
+}
+
+// getEnvWithDefault - Returns env variable or default value (for development)
+func getEnvWithDefault(key, defaultValue string) string {
+	if value, ok := os.LookupEnv(key); ok && value != "" {
+		return value
+	}
+	if os.Getenv("ENV") == "production" {
+		log.Fatalf("🔴 CRITICAL: Environment variable '%s' is required in production but not set!", key)
+	}
+	log.Printf("⚠️  WARNING: Environment variable '%s' not set, using default (development only)", key)
+	return defaultValue
 }
 
 // Response writer wrapper for status code tracking

@@ -18,13 +18,19 @@ type LokiClient struct {
 	logger  *zap.Logger
 }
 
-func NewLokiClient() *LokiClient {
+func NewLokiClient(baseURL string, logger *zap.Logger) *LokiClient {
+	if baseURL == "" {
+		baseURL = "http://loki:3100"
+	}
+	if logger == nil {
+		logger = zap.L()
+	}
 	return &LokiClient{
-		baseURL: "http://loki:3100",
+		baseURL: baseURL,
 		client: &http.Client{
 			Timeout: 30 * time.Second,
 		},
-		logger: zap.L(),
+		logger: logger,
 	}
 }
 
@@ -124,7 +130,7 @@ func (l *LokiClient) QueryRange(ctx context.Context, query string, start, end ti
 
 // GetErrorLogs retrieves error logs for a service
 func (l *LokiClient) GetErrorLogs(ctx context.Context, service string, duration time.Duration) ([]LogEntry, error) {
-	query := fmt.Sprintf(`{service="%s"} |= "error" or "ERROR" or "Error"`, service)
+	query := fmt.Sprintf(`{service="%s"} |~ "(?i)error|exception|fail"`, service)
 
 	start := time.Now().Add(-duration)
 	resp, err := l.QueryRange(ctx, query, start, time.Now(), 1000)

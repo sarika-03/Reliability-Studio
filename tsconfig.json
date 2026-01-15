@@ -1,0 +1,29 @@
+{
+  "compilerOptions": {
+    "target": "ES6",
+    "module": "ESNext",
+    "jsx": "react-jsx",
+    "moduleResolution": "node",
+    "strict": true,
+    "skipLibCheck": true,
+    "lib": ["ES2020", "DOM", "DOM.Iterable"],
+    "baseUrl": "src",
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "noEmit": true,
+    "types": ["react", "react-dom", "node"],
+    "typeRoots": ["./node_modules/@types"]
+  },
+  "include": [
+    "src"
+  ],
+  "exclude": [
+    "node_modules",
+    "dist",
+    "src/**/*.test.ts",
+    "src/**/*.test.tsx"
+  ]
+}

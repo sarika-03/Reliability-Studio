@@ -8,19 +8,22 @@ import (
 	"time"
 	"github.com/jmoiron/sqlx"
 	"go.uber.org/zap"
+	"github.com/sarika-03/Reliability-Studio/clients"
 )
 
 // SLOService handles SLO calculations and management
 type SLOService struct {
-	db     *sqlx.DB
-	logger *zap.Logger
+	db         *sqlx.DB
+	promClient *clients.PrometheusClient
+	logger     *zap.Logger
 }
 
 // NewSLOService creates a new SLOService instance
-func NewSLOService(db *sql.DB, logger *zap.Logger) *SLOService {
+func NewSLOService(db *sql.DB, promClient *clients.PrometheusClient, logger *zap.Logger) *SLOService {
 	return &SLOService{
-		db:     sqlx.NewDb(db, "postgres"),
-		logger: logger,
+		db:         sqlx.NewDb(db, "postgres"),
+		promClient: promClient,
+		logger:     logger,
 	}
 }
 
@@ -52,6 +55,7 @@ type SLOAnalysis struct {
 	Value        *float64   `json:"value"` // Pointer to distinguish between 0 and null
 	Target       float64    `json:"target"`
 	ErrorBudget  *float64   `json:"error_budget,omitempty"`
+	BurnRate     *float64   `json:"burn_rate,omitempty"`
 	Status       string     `json:"status"`
 	CalculatedAt time.Time  `json:"calculated_at"`
 	Error        *SLOError  `json:"error,omitempty"`
@@ -112,24 +116,142 @@ func (s *SLOService) CalculateSLO(ctx context.Context, sloID string) (*SLOAnalys
 		return analysis, nil
 	}
 
-	// For now, return a placeholder analysis
-	// TODO: Integrate with Prometheus for actual metric queries
-	analysis.Status = "no_data"
-	analysis.Error = &SLOError{
-		Type:    "prometheus_not_configured",
-		Message: "Prometheus integration not yet configured",
-		Details: "SLO calculation requires Prometheus integration",
-		Suggestions: []string{
-			"Configure Prometheus connection in the backend",
-			"Ensure Prometheus is running and accessible",
-			"Verify metrics are being scraped for this service",
-		},
+	if s.promClient == nil {
+		analysis.Status = "error"
+		analysis.Error = &SLOError{
+			Type:    "prometheus_not_configured",
+			Message: "Prometheus client is not initialized",
+			Details: "SLO calculation requires a valid Prometheus client.",
+			Suggestions: []string{
+				"Check backend configuration for Prometheus URL",
+				"Verify Prometheus client initialization in main.go",
+			},
+		}
+		return analysis, nil
+	}
+
+	// Build query
+	query, err := s.buildPrometheusQuery(slo)
+	if err != nil {
+		analysis.Status = "error"
+		analysis.Error = &SLOError{
+			Type:    "query_build_failed",
+			Message: "Failed to build Prometheus query",
+			Details: err.Error(),
+			Suggestions: []string{
+				"Check if the SLO type is supported",
+				"Verify service name is correct",
+			},
+		}
+		return analysis, nil
+	}
+
+	// Execute query
+	s.logger.Info("Calculating SLO", zap.String("slo_id", slo.ID), zap.String("query", query))
+	resp, err := s.promClient.Query(ctx, query, time.Time{})
+	if err != nil {
+		analysis.Status = "error"
+		analysis.Error = categorizePrometheusError(err, slo.Service)
+		return analysis, nil
+	}
+
+	// Parse result
+	if len(resp.Data.Result) == 0 {
+		analysis.Status = "no_data"
+		analysis.Error = &SLOError{
+			Type:    "no_metrics",
+			Message: "No metrics found for this period",
+			Details: fmt.Sprintf("Query returned empty result: %s", query),
+			Suggestions: []string{
+				"Ensure service is exporting metrics",
+				"Check if metric names in query are correct",
+				"Verify Prometheus scrape interval",
+			},
+		}
+	} else {
+			// Extract value from result
+		// Most instant queries return a single vector element
+		if len(resp.Data.Result[0].Value) >= 2 {
+			valStr, ok := resp.Data.Result[0].Value[1].(string)
+			if ok {
+				var val float64
+				fmt.Sscanf(valStr, "%f", &val)
+				analysis.Value = &val
+				
+				var budget float64
+				var burnRate float64
+				isHealthy := false
+
+				switch slo.Type {
+				case "availability":
+					// Higher is better. Target is Min %.
+					// e.g. Target 99.0, Val 99.9.
+					budget = val - slo.Target
+					allowedError := 100.0 - slo.Target
+					if allowedError > 0 {
+						currentError := 100.0 - val
+						burnRate = currentError / allowedError
+					}
+					isHealthy = val >= slo.Target
+
+				case "error_rate":
+					// Lower is better. Target is Max %.
+					// e.g. Target 1.0, Val 0.5.
+					budget = slo.Target - val
+					if slo.Target > 0 {
+						burnRate = val / slo.Target
+					}
+					isHealthy = val <= slo.Target
+
+				case "latency":
+					// Lower is better. Target is Max ms.
+					// e.g. Target 200ms, Val 100ms.
+					budget = slo.Target - val
+					if slo.Target > 0 {
+						burnRate = val / slo.Target
+					}
+					isHealthy = val <= slo.Target
+				
+				default:
+					// Fallback to "Higher is better"
+					budget = val - slo.Target
+					isHealthy = val >= slo.Target
+				}
+
+				analysis.ErrorBudget = &budget
+				analysis.BurnRate = &burnRate
+				
+				if isHealthy {
+					analysis.Status = "healthy"
+				} else {
+					analysis.Status = "breached"
+				}
+
+				// Warn if burn rate is high (e.g. > 1 means consuming budget too fast, for window-based math this differs but generic logic holds)
+				if isHealthy && burnRate > 1.0 {
+					analysis.Status = "warning"
+				}
+
+			} else {
+				analysis.Status = "error"
+				analysis.Error = &SLOError{
+					Type:    "parse_error",
+					Message: "Failed to parse metric value",
+					Details: "The value returned from Prometheus is not a valid string",
+				}
+			}
+		} else {
+			analysis.Status = "no_data"
+			analysis.Error = &SLOError{
+				Type:    "invalid_response",
+				Message: "Prometheus returned invalid result format",
+			}
+		}
 	}
 
 	// Save to database
 	if err := s.saveSLOAnalysis(ctx, analysis); err != nil {
-		// Log but don't fail the request
-		fmt.Printf("Warning: failed to save SLO analysis: %v\n", err)
+		s.logger.Warn("Failed to save SLO analysis", zap.Error(err))
 	}
 
 	return analysis, nil
@@ -269,8 +391,8 @@ func parseMetricValue(result interface{}) (float64, error) {
 // saveSLOAnalysis persists the analysis to database
 func (s *SLOService) saveSLOAnalysis(ctx context.Context, analysis *SLOAnalysis) error {
 	query := `
-		INSERT INTO slo_history (slo_id, value, target, error_budget, status, calculated_at)
-		VALUES ($1, $2, $3, $4, $5, $6)
+		INSERT INTO slo_history (slo_id, value, target, error_budget, burn_rate, status, calculated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
 	`
 
 	var value sql.NullFloat64
@@ -283,11 +405,17 @@ func (s *SLOService) saveSLOAnalysis(ctx context.Context, analysis *SLOAnalysis)
 		errorBudget = sql.NullFloat64{Float64: *analysis.ErrorBudget, Valid: true}
 	}
 
+	var burnRate sql.NullFloat64
+	if analysis.BurnRate != nil {
+		burnRate = sql.NullFloat64{Float64: *analysis.BurnRate, Valid: true}
+	}
+
 	_, err := s.db.ExecContext(ctx, query,
 		analysis.SLOID,
 		value,
 		analysis.Target,
 		errorBudget,
+		burnRate,
 		analysis.Status,
 		analysis.CalculatedAt,
 	)
@@ -413,7 +541,7 @@ func (s *SLOService) DeleteSLO(ctx context.Context, sloID string) error {
 // GetSLOHistory retrieves the history of an SLO
 func (s *SLOService) GetSLOHistory(ctx context.Context, sloID string) ([]SLOAnalysis, error) {
 	query := `
-		SELECT slo_id, value, target, error_budget, status, calculated_at
+		SELECT slo_id, value, target, error_budget, burn_rate, status, calculated_at
 		FROM slo_history
 		WHERE slo_id = $1
 		ORDER BY calculated_at DESC
@@ -429,9 +557,9 @@ func (s *SLOService) GetSLOHistory(ctx context.Context, sloID string) ([]SLOAnal
 	var history []SLOAnalysis
 	for rows.Next() {
 		var analysis SLOAnalysis
-		var value, errorBudget sql.NullFloat64
+		var value, errorBudget, burnRate sql.NullFloat64
 		
-		err := rows.Scan(&analysis.SLOID, &value, &analysis.Target, &errorBudget, &analysis.Status, &analysis.CalculatedAt)
+		err := rows.Scan(&analysis.SLOID, &value, &analysis.Target, &errorBudget, &burnRate, &analysis.Status, &analysis.CalculatedAt)
 		if err != nil {
 			continue
 		}
@@ -441,6 +569,9 @@ func (s *SLOService) GetSLOHistory(ctx context.Context, sloID string) ([]SLOAnal
 		}
 		if errorBudget.Valid {
 			analysis.ErrorBudget = &errorBudget.Float64
+		}
+		if burnRate.Valid {
+			analysis.BurnRate = &burnRate.Float64
 		}
 		
 		history = append(history, analysis)

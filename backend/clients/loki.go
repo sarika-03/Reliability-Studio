@@ -129,7 +129,7 @@ func (l *LokiClient) QueryLogs(ctx context.Context, query string, start, end tim
 
 // GetErrorLogs retrieves error logs for a service
 func (l *LokiClient) GetErrorLogs(ctx context.Context, service string, since time.Time, limit int) ([]LogEntry, error) {
-	query := fmt.Sprintf(`{service="%s"} |= "error" or |= "ERROR" or |= "exception" or |~ "(?i)error"`, service)
+	query := fmt.Sprintf(`{service="%s"} |~ "(?i)error|exception|fail|timeout"`, service)
 
 	end := time.Now()
 	start := since

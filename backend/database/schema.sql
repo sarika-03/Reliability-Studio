@@ -82,12 +82,13 @@ CREATE TABLE IF NOT EXISTS timeline_events (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     incident_id UUID REFERENCES incidents(id) ON DELETE CASCADE,
     event_type VARCHAR(100) NOT NULL,
-    timestamp TIMESTAMP NOT NULL,
+    timestamp TIMESTAMP NOT NULL DEFAULT NOW(),
     source VARCHAR(100) NOT NULL,
     title VARCHAR(500),
     description TEXT,
     severity VARCHAR(50),
     metadata JSONB DEFAULT '{}',
+    created_by VARCHAR(255),
     created_at TIMESTAMP DEFAULT NOW()
 );
 
@@ -263,73 +264,52 @@ CREATE INDEX IF NOT EXISTS idx_hypotheses_incident ON investigation_hypotheses(i
 CREATE INDEX IF NOT EXISTS idx_steps_incident ON investigation_steps(incident_id);
 CREATE INDEX IF NOT EXISTS idx_steps_status ON investigation_steps(status);
 
--- Pod Incident Data (Kubernetes Pod information related to incidents)
-CREATE TABLE IF NOT EXISTS pod_incident_data (
+-- Remediation Actions (Automated fixes)
+CREATE TABLE IF NOT EXISTS remediation_actions (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    incident_id UUID REFERENCES incidents(id) ON DELETE CASCADE NOT NULL,
-    pod_name VARCHAR(255) NOT NULL,
-    namespace VARCHAR(255) DEFAULT 'default',
-    status VARCHAR(50) NOT NULL, -- Running, CrashLoopBackOff, Failed, Pending, Unknown
-    restarts INT DEFAULT 0,
-    last_restart_time TIMESTAMP,
-    confidence_score FLOAT DEFAULT 0.9 CHECK (confidence_score >= 0 AND confidence_score <= 1.0),
-    created_at TIMESTAMP DEFAULT NOW(),
-    UNIQUE(incident_id, pod_name, namespace)
-);
-
--- Log Incident Data (Log patterns related to incidents)
-CREATE TABLE IF NOT EXISTS log_incident_data (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    incident_id UUID REFERENCES incidents(id) ON DELETE CASCADE NOT NULL,
-    pattern VARCHAR(500) NOT NULL, -- e.g., "OutOfMemory", "connection timeout"
-    count INT NOT NULL DEFAULT 1,
-    first_seen TIMESTAMP NOT NULL,
-    last_seen TIMESTAMP NOT NULL,
-    sample_logs TEXT[], -- Array of sample log lines
-    confidence_score FLOAT DEFAULT 0.85 CHECK (confidence_score >= 0 AND confidence_score <= 1.0),
-    created_at TIMESTAMP DEFAULT NOW(),
-    UNIQUE(incident_id, pattern)
-);
-
--- Trace Incident Data (Distributed trace information related to incidents)
-CREATE TABLE IF NOT EXISTS trace_incident_data (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    incident_id UUID REFERENCES incidents(id) ON DELETE CASCADE NOT NULL,
-    failure_count INT NOT NULL DEFAULT 0,
-    success_count INT NOT NULL DEFAULT 0,
-    error_rate FLOAT DEFAULT 0.0 CHECK (error_rate >= 0 AND error_rate <= 1.0),
-    average_latency FLOAT DEFAULT 0.0, -- in milliseconds
-    confidence_score FLOAT DEFAULT 0.88 CHECK (confidence_score >= 0 AND confidence_score <= 1.0),
-    created_at TIMESTAMP DEFAULT NOW(),
-    UNIQUE(incident_id)
-);
-
--- Recovery Actions (Automated or suggested recovery actions)
-CREATE TABLE IF NOT EXISTS recovery_actions (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    incident_id UUID REFERENCES incidents(id) ON DELETE CASCADE NOT NULL,
-    title VARCHAR(500) NOT NULL,
-    description TEXT,
-    action_type VARCHAR(100) NOT NULL, -- restart_pod, rollback_deployment, scale_deployment, restart_service, etc.
-    priority VARCHAR(50) DEFAULT 'high' CHECK (priority IN ('critical', 'high', 'medium', 'low')),
-    status VARCHAR(50) DEFAULT 'suggested' CHECK (status IN ('suggested', 'approved', 'in_progress', 'completed', 'failed', 'skipped')),
-    root_cause_match VARCHAR(255), -- Why this action is suggested
-    confidence_score FLOAT DEFAULT 0.8 CHECK (confidence_score >= 0 AND confidence_score <= 1.0),
-    parameters JSONB DEFAULT '{}', -- K8s action parameters: { "pod_name": "...", "namespace": "..." }
-    executed_at TIMESTAMP,
+    incident_id UUID REFERENCES incidents(id) ON DELETE CASCADE,
+    action_type VARCHAR(100) NOT NULL,
+    target VARCHAR(255) NOT NULL,
+    namespace VARCHAR(255),
+    status VARCHAR(50) DEFAULT 'pending',
+    result TEXT,
     executed_by VARCHAR(255),
-    result TEXT, -- success or failure message
-    approved_at TIMESTAMP,
-    approved_by VARCHAR(255),
     created_at TIMESTAMP DEFAULT NOW(),
-    updated_at TIMESTAMP DEFAULT NOW()
+    completed_at TIMESTAMP
 );
 
--- Create indexes for incident data
-CREATE INDEX IF NOT EXISTS idx_pod_incident ON pod_incident_data(incident_id);
-CREATE INDEX IF NOT EXISTS idx_log_incident ON log_incident_data(incident_id);
-CREATE INDEX IF NOT EXISTS idx_trace_incident ON trace_incident_data(incident_id);
-CREATE INDEX IF NOT EXISTS idx_recovery_incident ON recovery_actions(incident_id);
-CREATE INDEX IF NOT EXISTS idx_recovery_status ON recovery_actions(status);
-CREATE INDEX IF NOT EXISTS idx_incidents_severity ON incidents(severity);
-CREATE INDEX IF NOT EXISTS idx_incidents_status ON incidents(status);
+CREATE INDEX IF NOT EXISTS idx_remediation_incident ON remediation_actions(incident_id);
+
+-- Autonomous Reliability Agent (ARA) specific tables
+CREATE TABLE IF NOT EXISTS investigation_logs (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    incident_id UUID REFERENCES incidents(id) ON DELETE CASCADE,
+    message TEXT NOT NULL,
+    metadata JSONB DEFAULT '{}',
+    created_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_investigation_logs_incident ON investigation_logs(incident_id);
+
+-- Alter existing tables to support ARA features and fix core mismatches
+DO $$ 
+BEGIN 
+    -- ARA Columns
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='investigation_hypotheses' AND column_name='is_auto_generated') THEN
+        ALTER TABLE investigation_hypotheses ADD COLUMN is_auto_generated BOOLEAN DEFAULT false;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='investigation_hypotheses' AND column_name='evidence_payload') THEN
+        ALTER TABLE investigation_hypotheses ADD COLUMN evidence_payload JSONB DEFAULT '{}';
+    END IF;
+
+    -- Fix Mismatches
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='services' AND column_name='status') THEN
+        ALTER TABLE services ADD COLUMN status VARCHAR(50) DEFAULT 'healthy';
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='incidents' AND column_name='service') THEN
+        ALTER TABLE incidents ADD COLUMN service VARCHAR(255);
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='incidents' AND column_name='service_id') THEN
+        ALTER TABLE incidents ADD COLUMN service_id UUID REFERENCES services(id);
+    END IF;
+END $$;
